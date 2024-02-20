@@ -27,8 +27,7 @@ import static org.jgroups.jgraas.common.Message.newBuilder;
  * @author Bela Ban
  * @since  5.3.3
  */
-public abstract class Utils {
-
+public class Utils {
 
 
     protected static org.jgroups.jgraas.common.Message jgMessageToProtoMessage(String cluster, Message m,
@@ -39,7 +38,7 @@ public abstract class Utils {
         org.jgroups.jgraas.common.Message.Builder builder=msgBuilder(cluster, m.getSrc(), m.getDest(), m.getFlags(), md);
 
         // Sets the headers
-        List<org.jgroups.jgraas.common.Header> proto_hdrs=jgHeadersToProtoHeaders(((BaseMessage)m).headers(), m);
+        List<org.jgroups.jgraas.common.Header> proto_hdrs=jgHeadersToProtoHeaders(((BaseMessage)m).headers());
         builder.addAllHeaders(proto_hdrs);
         boolean is_rsp=proto_hdrs != null && proto_hdrs.stream()
           .anyMatch(h -> h.hasRpcHdr() && h.getRpcHdr().getType() > 0); // 1=RSP, 2=EXC_RSP
@@ -109,7 +108,7 @@ public abstract class Utils {
     }
 
 
-    protected static List<org.jgroups.jgraas.common.Header> jgHeadersToProtoHeaders(org.jgroups.Header[] jg_hdrs, Message jg_msg) {
+    protected static List<org.jgroups.jgraas.common.Header> jgHeadersToProtoHeaders(org.jgroups.Header[] jg_hdrs) {
         if(jg_hdrs == null || jg_hdrs.length == 0)
             return List.of();
         List<org.jgroups.jgraas.common.Header> l=new ArrayList<>(jg_hdrs.length);
