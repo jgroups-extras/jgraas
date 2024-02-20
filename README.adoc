@@ -1,0 +1,8 @@
+= JGraaS: JGroups as a service
+
+TBA
+
+See [1] for details.
+
+[1] https://github.com/jgroups-extras/jgraas-common
+
