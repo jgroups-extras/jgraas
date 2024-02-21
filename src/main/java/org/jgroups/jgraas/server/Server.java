@@ -155,7 +155,7 @@ public class Server extends ReceiverAdapter implements ConnectionListener, Diagn
     public Server init() throws Exception {
         diag=new DiagnosticsHandler(log, socket_factory, thread_factory)
           .registerProbeHandler(this)
-          .printHeaders(b -> String.format("JGroupsServer [addr=%s, cluster=JGroupsServer, version=%s]\n",
+          .printHeaders(b -> String.format("Server [addr=%s, cluster=Server, version=%s]\n",
                                            localAddress(), Version.description));
         return this;
     }
@@ -167,12 +167,12 @@ public class Server extends ReceiverAdapter implements ConnectionListener, Diagn
      * Brings the Router into a fully functional state.
      */
     @ManagedOperation(description="Lifecycle operation. Called after create(). When this method is called, "
-            + "the managed attributes have already been set. Brings the Router into a fully functional state.")
+            + "the managed attributes have already been set. Brings the server into a fully functional state.")
     public Server start() throws Exception {
         if(!running.compareAndSet(false, true))
             return this;
         if(jmx)
-            JmxConfigurator.register(this, Util.getMBeanServer(), "jgroups:name=JGroupsServer");
+            JmxConfigurator.register(this, Util.getMBeanServer(), "jgroups:name=Server");
 
         if(diag.isEnabled()) {
             StackType ip_version=bind_addr instanceof Inet6Address? StackType.IPv6 : StackType.IPv4;
