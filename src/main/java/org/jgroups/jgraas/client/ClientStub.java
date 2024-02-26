@@ -4,14 +4,13 @@ import org.jgroups.Address;
 import org.jgroups.PhysicalAddress;
 import org.jgroups.annotations.GuardedBy;
 import org.jgroups.blocks.cs.*;
+import org.jgroups.jgraas.server.JChannelServer;
 import org.jgroups.logging.Log;
 import org.jgroups.logging.LogFactory;
 import org.jgroups.protocols.PingData;
-import org.jgroups.stack.GossipData;
-import org.jgroups.stack.GossipType;
 import org.jgroups.stack.IpAddress;
+import org.jgroups.util.ByteArray;
 import org.jgroups.util.ByteArrayDataInputStream;
-import org.jgroups.util.ByteArrayDataOutputStream;
 import org.jgroups.util.SocketFactory;
 import org.jgroups.util.Util;
 
@@ -27,7 +26,6 @@ import java.util.concurrent.TimeUnit;
  * @author Bela Ban
  */
 public class ClientStub extends ReceiverAdapter implements Comparable<ClientStub>, ConnectionListener {
-    public interface StubReceiver        {void receive(GossipData data);}
     public interface MembersNotification {void members(List<PingData> mbrs);}
     public interface CloseListener       {void closed(ClientStub stub);}
 
@@ -36,7 +34,7 @@ public class ClientStub extends ReceiverAdapter implements Comparable<ClientStub
     protected IpAddress         remote;    // address of remote Server
     protected InetSocketAddress remote_sa; // address of remote Server, not resolved yet
     protected final boolean     use_nio;
-    protected StubReceiver      receiver;  // external consumer of data, e.g. TUNNEL
+    protected Receiver          receiver;  // external consumer of data, e.g. TUNNEL
     protected CloseListener     close_listener;
     protected SocketFactory     socket_factory;
     protected static final Log  log=LogFactory.getLog(ClientStub.class);
@@ -69,7 +67,7 @@ public class ClientStub extends ReceiverAdapter implements Comparable<ClientStub
     }
 
     /**
-     * Creates a stub to a remote_sa {@link org.jgroups.jgraas.server.Server}.
+     * Creates a stub to a remote_sa {@link JChannelServer}.
      * @param local_sa The local_sa bind address and port
      * @param remote_sa The address:port of the server
      * @param use_nio Whether to use ({@link org.jgroups.protocols.TCP_NIO2}) or {@link org.jgroups.protocols.TCP}
@@ -98,8 +96,8 @@ public class ClientStub extends ReceiverAdapter implements Comparable<ClientStub
 
     public IpAddress     local()                              {return local;}
     public IpAddress     remote()                             {return remote;}
-    public ClientStub    receiver(StubReceiver r)             {receiver=r; return this;}
-    public StubReceiver  receiver()                           {return receiver;}
+    public ClientStub    receiver(Receiver r)                 {receiver=r; return this;}
+    public Receiver      receiver()                           {return receiver;}
     public boolean       tcpNoDelay()                         {return tcp_nodelay;}
     public ClientStub    tcpNoDelay(boolean tcp_nodelay)      {this.tcp_nodelay=tcp_nodelay; return this;}
     public CloseListener connectionListener()                 {return close_listener;}
@@ -136,12 +134,6 @@ public class ClientStub extends ReceiverAdapter implements Comparable<ClientStub
         }
         if(handle_heartbeats)
             last_heartbeat=System.currentTimeMillis();
-        try {
-            writeRequest(new GossipData(GossipType.REGISTER, group, addr, logical_name, phys_addr));
-        }
-        catch(Exception ex) {
-            throw new Exception(String.format("connection to %s failed: %s", group, ex));
-        }
     }
 
     public synchronized void connect() throws Exception {
@@ -162,37 +154,13 @@ public class ClientStub extends ReceiverAdapter implements Comparable<ClientStub
 
 
     public void disconnect(String group, Address addr) throws Exception {
-        if(isConnected())
-            writeRequest(new GossipData(GossipType.UNREGISTER, group, addr));
+        if(isConnected()) {
+            //    writeRequest(new GossipData(GossipType.UNREGISTER, group, addr));
+        }
     }
 
     public void destroy() {
         Util.close(client);
-    }
-
-    /**
-     * Fetches a list of {@link PingData} from the Server, one for each member in the given group. This call
-     * returns immediately and when the results are available, the
-     * {@link ClientStub.MembersNotification#members(List)} callback will be invoked.
-     * @param group The group for which we need members information
-     * @param callback The callback to be invoked.
-     */
-    public void getMembers(final String group, MembersNotification callback) throws Exception {
-        if(callback == null)
-            return;
-        // if(!isConnected()) throw new Exception ("not connected");
-        synchronized(get_members_map) {
-            List<MembersNotification> set=get_members_map.computeIfAbsent(group, k -> new ArrayList<>());
-            set.add(callback);
-        }
-        try {
-            writeRequest(new GossipData(GossipType.GET_MBRS, group, null));
-        }
-        catch(Exception ex) {
-            removeResponse(group, callback);
-            throw new Exception(String.format("connection to %s broken. Could not send %s request: %s",
-                                              gossipRouterAddress(), GossipType.GET_MBRS, ex));
-        }
     }
 
 
@@ -202,7 +170,7 @@ public class ClientStub extends ReceiverAdapter implements Comparable<ClientStub
 
     public void sendToMember(String group, Address dest, Address sender, byte[] data, int offset, int length) throws Exception {
         try {
-            writeRequest(new GossipData(GossipType.MESSAGE, group, dest, data, offset, length).setSender(sender));
+            // writeRequest(new GossipData(GossipType.MESSAGE, group, dest, data, offset, length).setSender(sender));
         }
         catch(Exception ex) {
             throw new Exception(String.format("connection to %s broken. Could not send message to %s: %s",
@@ -213,26 +181,14 @@ public class ClientStub extends ReceiverAdapter implements Comparable<ClientStub
 
     @Override
     public void receive(Address sender, byte[] buf, int offset, int length) {
-        receive(sender, new ByteArrayDataInputStream(buf, offset, length));
+        receive(sender, new ByteArrayDataInputStream(buf, offset, length), length);
     }
 
     @Override
-    public void receive(Address sender, DataInput in) {
+    public void receive(Address sender, DataInput in, int length) {
         try {
-            GossipData data=new GossipData();
-            data.readFrom(in);
-            switch(data.getType()) {
-                case HEARTBEAT:
-                    break;
-                case MESSAGE:
-                case SUSPECT:
-                    if(receiver != null)
-                        receiver.receive(data);
-                    break;
-                case GET_MBRS_RSP:
-                    notifyResponse(data.getGroup(), data.getPingData());
-                    break;
-            }
+            if(receiver != null)
+                receiver.receive(sender, in, length);
             if(handle_heartbeats)
                 last_heartbeat=System.currentTimeMillis();
         } catch(Exception ex) {
@@ -291,11 +247,13 @@ public class ClientStub extends ReceiverAdapter implements Comparable<ClientStub
         return cl;
     }
 
-    public void writeRequest(GossipData req) throws Exception {
-        int size=req.serializedSize();
-        ByteArrayDataOutputStream out=new ByteArrayDataOutputStream(size+5);
-        req.writeTo(out);
-        client.send(remote, out.buffer(), 0, out.position());
+
+    public void send(ByteArray buf) throws Exception {
+        client.send(remote, buf.getArray(), buf.getOffset(), buf.getLength());
+    }
+
+    public void send(byte[] buf, int offset, int length) throws Exception {
+        client.send(remote, buf, offset, length);
     }
 
     protected void removeResponse(String group, MembersNotification notif) {

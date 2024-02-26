@@ -3,10 +3,9 @@ package org.jgroups.jgraas.client;
 
 import org.jgroups.Address;
 import org.jgroups.PhysicalAddress;
+import org.jgroups.jgraas.server.JChannelServer;
 import org.jgroups.logging.Log;
 import org.jgroups.logging.LogFactory;
-import org.jgroups.stack.GossipData;
-import org.jgroups.stack.GossipType;
 import org.jgroups.util.SocketFactory;
 import org.jgroups.util.TimeScheduler;
 import org.jgroups.util.Util;
@@ -21,17 +20,17 @@ import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
 /**
- * Client talking to the remote {@link org.jgroups.jgraas.server.Server}
+ * Client talking to the remote {@link JChannelServer}
  * @author Bela Ban
  * @since 5.3.3
  */
 public class ClientStubManager implements Runnable, ClientStub.CloseListener {
     protected final List<ClientStub> stubs=new CopyOnWriteArrayList<>();
     protected final TimeScheduler    timer;
-    protected final String           cluster_name;
-    protected final Address          local_addr;
-    protected final String           logical_name;
-    protected final PhysicalAddress  phys_addr;
+    protected final String           cluster_name="changeme !!!";
+    protected Address                local_addr;
+    protected String                 logical_name;
+    protected PhysicalAddress        phys_addr;
     protected final long             reconnect_interval; // reconnect interval (ms)
     protected boolean                use_nio=true;       // whether to use TcpClient or NioClient
     protected Future<?>              reconnector_task, heartbeat_task, timeout_checker_task;
@@ -52,19 +51,14 @@ public class ClientStubManager implements Runnable, ClientStub.CloseListener {
     protected int                    max_send_queue=128;
 
 
-    public ClientStubManager(Log log, TimeScheduler timer, String cluster_name, Address local_addr,
-                             String logical_name, PhysicalAddress phys_addr, long reconnect_interval) {
+    public ClientStubManager(Log log, TimeScheduler timer, long reconnect_interval) {
         this.log=log != null? log : LogFactory.getLog(ClientStubManager.class);
         this.timer=timer;
-        this.cluster_name=cluster_name;
-        this.local_addr=local_addr;
-        this.logical_name=logical_name;
-        this.phys_addr=phys_addr;
         this.reconnect_interval=reconnect_interval;
     }
 
     public static ClientStubManager emptyClientStubManager(Log log, TimeScheduler timer) {
-        return new ClientStubManager(log, timer,null,null,null, null,0L);
+        return new ClientStubManager(log, timer, 0L);
     }
     
 
@@ -266,10 +260,9 @@ public class ClientStubManager implements Runnable, ClientStub.CloseListener {
     }
 
     protected void sendHeartbeat() {
-        GossipData hb=new GossipData(GossipType.HEARTBEAT);
         forEach(s -> {
             try {
-                s.writeRequest(hb);
+                // s.writeRequest(hb);
             }
             catch(Exception ex) {
                 log.error("failed sending heartbeat", ex);

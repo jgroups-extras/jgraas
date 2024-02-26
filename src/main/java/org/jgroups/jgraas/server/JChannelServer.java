@@ -1,34 +1,39 @@
 package org.jgroups.jgraas.server;
 
-import org.jgroups.Address;
-import org.jgroups.PhysicalAddress;
-import org.jgroups.Version;
+import org.jgroups.Receiver;
+import org.jgroups.*;
 import org.jgroups.annotations.Component;
 import org.jgroups.annotations.ManagedAttribute;
 import org.jgroups.annotations.ManagedOperation;
+import org.jgroups.annotations.Property;
 import org.jgroups.blocks.cs.*;
 import org.jgroups.conf.AttributeType;
+import org.jgroups.jgraas.common.*;
+import org.jgroups.jgraas.util.Utils;
 import org.jgroups.jmx.JmxConfigurator;
 import org.jgroups.jmx.ReflectUtils;
 import org.jgroups.logging.Log;
 import org.jgroups.logging.LogFactory;
 import org.jgroups.stack.Configurator;
 import org.jgroups.stack.DiagnosticsHandler;
-import org.jgroups.stack.GossipData;
 import org.jgroups.stack.IpAddress;
 import org.jgroups.util.*;
+import org.jgroups.util.ByteArray;
 
 import javax.net.ssl.SNIHostName;
 import javax.net.ssl.SSLContext;
+import java.io.ByteArrayInputStream;
 import java.io.DataInput;
+import java.io.InputStream;
 import java.net.Inet6Address;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.NetworkInterface;
 import java.nio.ByteBuffer;
-import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.TreeMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -36,12 +41,15 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * @author Bela Ban
  * @since 5.3.3
  */
-public class Server extends ReceiverAdapter implements ConnectionListener, DiagnosticsHandler.ProbeHandler {
+public class JChannelServer extends ReceiverAdapter implements ConnectionListener, DiagnosticsHandler.ProbeHandler {
     @ManagedAttribute(description="The bind address which should be used by the server")
     protected InetAddress          bind_addr;
 
     @ManagedAttribute(description="server port on which the server accepts client connections", writable=true)
     protected int                  port=12500;
+
+    @ManagedAttribute(description="The cluster name")
+    protected String               cluster_name;
     
     @ManagedAttribute(description="Time (in msecs) until idle client connections are closed. 0 disables expiration.",
       writable=true,type=AttributeType.TIME)
@@ -71,9 +79,6 @@ public class Server extends ReceiverAdapter implements ConnectionListener, Diagn
     @ManagedAttribute(description="The max number of bytes a message can have. If greater, an exception will be " +
       "thrown. 0 disables this", type=AttributeType.BYTES)
     protected int                  max_length;
-    protected BaseServer           server;
-    protected final AtomicBoolean  running=new AtomicBoolean(false);
-    protected final Log            log=LogFactory.getLog(this.getClass());
 
     @Component(name="diag",description="DiagnosticsHandler listening for probe requests")
     protected DiagnosticsHandler   diag;
@@ -86,76 +91,85 @@ public class Server extends ReceiverAdapter implements ConnectionListener, Diagn
     @ManagedAttribute(description="When sending and non_blocking, how many messages to queue max")
     protected int                  max_send_queue=128;
 
-    // mapping between groups and <member address> - <physical addr / logical name> pairs
-    protected final Map<String,ConcurrentMap<Address,Entry>> address_mappings=new ConcurrentHashMap<>();
+    @Property(description="Configuration of the channel")
+    protected String               config="udp.xml";
 
-    // to cache output streams for serialization (https://issues.redhat.com/browse/JGRP-2576)
-    protected final Map<Address,ByteArrayDataOutputStream>   output_streams=new ConcurrentHashMap<>();
+    @Property(description="The channel name")
+    protected String               name;
+
+    protected JChannel             channel;
+    protected BaseServer           server;
+    protected Marshaller           marshaller;
+    protected JChannelReceiver     receiver=new JChannelReceiver();
+    protected final MessageFactory msg_factory=new DefaultMessageFactory();
+    protected final AtomicBoolean  running=new AtomicBoolean(false);
+    protected final Log            log=LogFactory.getLog(this.getClass());
 
 
-    public Server(String bind_addr, int local_port) throws Exception {
-        this.port=local_port;
-        this.bind_addr=bind_addr != null? InetAddress.getByName(bind_addr) : null;
-        init();
+
+
+    public JChannelServer(String bind_addr, int local_port) throws Exception {
+        this(bind_addr != null? InetAddress.getByName(bind_addr) : null, local_port, null);
     }
 
-    public Server(InetAddress bind_addr, int local_port) throws Exception {
+    public JChannelServer(InetAddress bind_addr, int local_port) throws Exception {
+        this(bind_addr, local_port, null);
+    }
+
+    public JChannelServer(InetAddress bind_addr, int local_port, String config) throws Exception {
         this.port=local_port;
         this.bind_addr=bind_addr;
         init();
+        if(config != null)
+            this.config=config;
     }
 
-    public Address       localAddress()                     {return server.localAddress();}
-    public String        bindAddress()                      {return bind_addr != null? bind_addr.toString() : null;}
-    public Server        bindAddress(InetAddress addr)      {this.bind_addr=addr; return this;}
-    public int           port()                             {return port;}
-    public Server        port(int port)                     {this.port=port; return this;}
-    public long          expiryTime()                       {return expiry_time;}
-    public Server        expiryTime(long t)                 {this.expiry_time=t; return this;}
-    public long          reaperInterval()                   {return reaper_interval;}
-    public Server        reaperInterval(long t)             {this.reaper_interval=t; return this;}
-    public int           lingerTimeout()                    {return linger_timeout;}
-    public Server        lingerTimeout(int t)               {this.linger_timeout=t; return this;}
-    public int           recvBufferSize()                   {return recv_buf_size;}
-    public Server        recvBufferSize(int s)              {recv_buf_size=s; return this;}
-    public ThreadFactory threadPoolFactory()                {return thread_factory;}
-    public Server        threadPoolFactory(ThreadFactory f) {this.thread_factory=f; return this;}
-    public SocketFactory socketFactory()                    {return socket_factory;}
-    public Server        socketFactory(SocketFactory sf)    {this.socket_factory=sf; return this;}
-    public boolean       jmx()                              {return jmx;}
-    public Server        jmx(boolean flag)                  {jmx=flag; return this;}
-    public boolean       useNio()                           {return use_nio;}
-    public Server        useNio(boolean flag)               {use_nio=flag; return this;}
-    public int           maxLength()                        {return max_length;}
-    public Server        maxLength(int len)                 {max_length=len; if(server != null) server.setMaxLength(len);
+    public String         config()                           {return config;}
+    public JChannelServer config(String cfg)                 {this.config=cfg; return this;}
+    public String         name()                             {return name;}
+    public JChannelServer name(String n)                     {this.name=n; if(channel != null) channel.name(n); return this;}
+    public Address        localAddress()                     {return server.localAddress();}
+    public String         bindAddress()                      {return bind_addr != null? bind_addr.toString() : null;}
+    public JChannelServer bindAddress(InetAddress addr)      {this.bind_addr=addr; return this;}
+    public int            port()                             {return port;}
+    public JChannelServer port(int port)                     {this.port=port; return this;}
+    public long           expiryTime()                       {return expiry_time;}
+    public JChannelServer expiryTime(long t)                 {this.expiry_time=t; return this;}
+    public long           reaperInterval()                   {return reaper_interval;}
+    public JChannelServer reaperInterval(long t)             {this.reaper_interval=t; return this;}
+    public int            lingerTimeout()                    {return linger_timeout;}
+    public JChannelServer lingerTimeout(int t)               {this.linger_timeout=t; return this;}
+    public int            recvBufferSize()                   {return recv_buf_size;}
+    public JChannelServer recvBufferSize(int s)              {recv_buf_size=s; return this;}
+    public ThreadFactory  threadPoolFactory()                {return thread_factory;}
+    public JChannelServer threadPoolFactory(ThreadFactory f) {this.thread_factory=f; return this;}
+    public SocketFactory  socketFactory()                    {return socket_factory;}
+    public JChannelServer socketFactory(SocketFactory sf)    {this.socket_factory=sf; return this;}
+    public boolean        jmx()                              {return jmx;}
+    public JChannelServer jmx(boolean flag)                  {jmx=flag; return this;}
+    public boolean        useNio()                           {return use_nio;}
+    public JChannelServer useNio(boolean flag)               {use_nio=flag; return this;}
+    public int            maxLength()                        {return max_length;}
+    public JChannelServer maxLength(int len)                 {max_length=len; if(server != null) server.setMaxLength(len);
                                                              return this;}
-    public DiagnosticsHandler diagHandler()                 {return diag;}
-    public TLS           tls()                              {return tls;}
-    public Server        tls(TLS t)                         {this.tls=t; return this;}
-    public boolean       nonBlockingSends()                 {return non_blocking_sends;}
-    public Server        nonBlockingSends(boolean b)        {this.non_blocking_sends=b; return this;}
-    public int           maxSendQueue()                     {return max_send_queue;}
-    public Server        maxSendQueue(int s)                {this.max_send_queue=s; return this;}
+    public DiagnosticsHandler diagHandler()                  {return diag;}
+    public TLS            tls()                              {return tls;}
+    public JChannelServer tls(TLS t)                         {this.tls=t; return this;}
+    public boolean        nonBlockingSends()                 {return non_blocking_sends;}
+    public JChannelServer nonBlockingSends(boolean b)        {this.non_blocking_sends=b; return this;}
+    public int            maxSendQueue()                     {return max_send_queue;}
+    public JChannelServer maxSendQueue(int s)                {this.max_send_queue=s; return this;}
+    public Marshaller     marshaller()                       {return marshaller;}
+    public JChannelServer marshaller(Marshaller m)           {this.marshaller=m; return this;}
 
 
     @ManagedAttribute(description="operational status", name="running")
     public boolean running() {return running.get();}
 
-    @ManagedAttribute(description="The number of different clusters registered")
-    public int numRegisteredClusters() {
-        return address_mappings.size();
-    }
 
-    @ManagedAttribute(description="The number of registered client (all clusters)")
-    public int numRegisteredClients() {
-        return (int)address_mappings.values().stream().mapToLong(s -> s.keySet().size()).sum();
-    }
-
-
-    public Server init() throws Exception {
-        diag=new DiagnosticsHandler(log, socket_factory, thread_factory)
-          .registerProbeHandler(this)
-          .printHeaders(b -> String.format("Server [addr=%s, cluster=Server, version=%s]\n",
+    public JChannelServer init() throws Exception {
+        diag=new DiagnosticsHandler(log, socket_factory, thread_factory).registerProbeHandler(this)
+          .printHeaders(b -> String.format("JChannelServer [addr=%s, cluster=JChannelServer, version=%s]\n",
                                            localAddress(), Version.description));
         return this;
     }
@@ -168,11 +182,14 @@ public class Server extends ReceiverAdapter implements ConnectionListener, Diagn
      */
     @ManagedOperation(description="Lifecycle operation. Called after create(). When this method is called, "
             + "the managed attributes have already been set. Brings the server into a fully functional state.")
-    public Server start() throws Exception {
+    public JChannelServer start() throws Exception {
         if(!running.compareAndSet(false, true))
             return this;
+
+        channel=new JChannel(config).name(name).setReceiver(receiver);
+
         if(jmx)
-            JmxConfigurator.register(this, Util.getMBeanServer(), "jgroups:name=Server");
+            JmxConfigurator.register(this, Util.getMBeanServer(), "jgroups:name=JChannelServer");
 
         if(diag.isEnabled()) {
             StackType ip_version=bind_addr instanceof Inet6Address? StackType.IPv6 : StackType.IPv4;
@@ -194,7 +211,7 @@ public class Server extends ReceiverAdapter implements ConnectionListener, Diagn
           .addConnectionListener(this)
           .connExpireTimeout(expiry_time).reaperInterval(reaper_interval).linger(linger_timeout);
         server.start();
-        Runtime.getRuntime().addShutdownHook(new Thread(Server.this::stop));
+        Runtime.getRuntime().addShutdownHook(new Thread(JChannelServer.this::stop));
         return this;
     }
 
@@ -207,41 +224,21 @@ public class Server extends ReceiverAdapter implements ConnectionListener, Diagn
             return;
 
         try {
-            JmxConfigurator.unregister(this, Util.getMBeanServer(), "jgroups:name=JGroupsServer");
+            JmxConfigurator.unregister(this, Util.getMBeanServer(), "jgroups:name=JChannelServer");
         }
         catch(Exception ex) {
             log.error(Util.getMessage("MBeanDeRegistrationFailed"), ex);
         }
-        Util.close(diag, server);
+        Util.close(diag, server, channel);
         log.debug("router stopped");
     }
 
 
-    @ManagedOperation(description="Dumps the contents of the routing table")
-    public String dumpRoutingTable() {
+    @ManagedOperation(description="Prints all connections")
+    public String printConnections() {
         return server.printConnections();
     }
 
-
-    @ManagedOperation(description="Dumps the address mappings")
-    public String dumpAddressMappings() {
-        StringBuilder sb=new StringBuilder();
-        for(Map.Entry<String,ConcurrentMap<Address,Entry>> entry: address_mappings.entrySet()) {
-            String group=entry.getKey();
-            Map<Address,Entry> val=entry.getValue();
-            if(val == null)
-                continue;
-            sb.append(group).append(":\n");
-            for(Map.Entry<Address,Entry> entry2: val.entrySet()) {
-                Address logical_addr=entry2.getKey();
-                Entry val2=entry2.getValue();
-                if(val2 == null)
-                    continue;
-                sb.append(String.format("  %s: %s (client_addr: %s, uuid:%s)\n", val2.logical_name, val2.phys_addr, val2.client_addr, logical_addr));
-            }
-        }
-        return sb.toString();
-    }
 
 
     @Override public void receive(Address sender, byte[] buf, int offset, int length) {
@@ -250,31 +247,61 @@ public class Server extends ReceiverAdapter implements ConnectionListener, Diagn
 
     @Override
     public void receive(Address sender, ByteBuffer buf) {
-        String req=new String(buf.array(), 0, buf.position());
-        System.out.printf("-- from %s: %s\n", sender, req);
-
-        String rsp=String.format("echo: %s", req);
         try {
-            server.send(sender, ByteBuffer.wrap(rsp.getBytes()));
-        }
-        catch(Exception e) {
-            throw new RuntimeException(e);
-        }
-
-    }
-
-    public void receive(Address sender, DataInput in) throws Exception {
-        String req=in.readUTF();
-        System.out.printf("-- from %s: %s\n", sender, req);
-
-        String rsp=String.format("echo: %s", req);
-        try {
-            server.send(sender, ByteBuffer.wrap(rsp.getBytes()));
+            ByteArrayInputStream in=new ByteArrayInputStream(buf.array(), buf.arrayOffset(), buf.remaining());
+            handleRequest(ProtoRequest.parseFrom(in));
         }
         catch(Exception e) {
             throw new RuntimeException(e);
         }
     }
+
+    public void receive(Address sender, DataInput in, int length) throws Exception {
+        try {
+            if(in instanceof InputStream) {
+                handleRequest(ProtoRequest.parseDelimitedFrom((InputStream)in));
+            }
+            else {
+                byte[] buf=new byte[length];
+                in.readFully(buf);
+                ByteArrayInputStream input=new ByteArrayInputStream(buf);
+                handleRequest(ProtoRequest.parseDelimitedFrom(input));
+            }
+        }
+        catch(Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+
+    protected void handleRequest(ProtoRequest req) throws Exception {
+        ProtoRequest.ChoiceCase c=req.getChoiceCase();
+        switch(c) {
+            case MESSAGE:
+                Message msg=Utils.protoMessageToJG(req.getMessage(), msg_factory, marshaller);
+                Object obj=msg.getPayload();
+                System.out.printf("-- msg from %s: %s\n", msg.getSrc(), obj);
+                channel.send(msg);
+                break;
+            case MESSAGE_BATCH:
+                throw new IllegalStateException("server cannot receive message batches");
+            case JOIN_REQ:
+                cluster_name=req.getJoinReq().getClusterName();
+                channel.connect(cluster_name);
+                break;
+            case LEAVE_REQ:
+                channel.disconnect();
+                break;
+            case VIEW:
+                break;
+            case EXCEPTION:
+                break;
+            default:
+                log.warn("request %s not known", c);
+                break;
+        }
+    }
+
 
     public Map<String,String> handleProbe(String... keys) {
         Map<String,String> map=new TreeMap<>();
@@ -339,226 +366,66 @@ public class Server extends ReceiverAdapter implements ConnectionListener, Diagn
         return new String[]{"ops", "op", "invoke", "keys", "member-addrs", "dump"};
     }
 
-    protected ByteArrayDataOutputStream getOutputStream(Address mbr, int size) {
-        return output_streams.computeIfAbsent(mbr, __ -> new ByteArrayDataOutputStream(size));
-    }
 
-
-    @Override
-    public void connectionClosed(Connection conn) {
-        removeFromAddressMappings(conn.peerAddress());
-    }
-
-    @Override
-    public void connectionEstablished(Connection conn) {
+    @Override public void connectionEstablished(Connection conn) {
         log.debug("connection to %s established", conn.peerAddress());
     }
 
-    protected GossipData readRequest(DataInput in) {
-        GossipData data=new GossipData();
-        try {
-            data.readFrom(in);
-            return data;
-        }
-        catch(Exception ex) {
-            log.error(Util.getMessage("FailedReadingRequest"), ex);
-            return null;
-        }
+    @Override public void connectionClosed(Connection conn) {}
+
+
+    protected void send(ProtoRequest req) throws Exception {
+        ByteArray buf=Utils.serialize(req);
+        server.send(null, buf.getArray(), buf.getOffset(), buf.getLength());
     }
 
+    protected class JChannelReceiver implements Receiver {
 
-    protected void addAddressMapping(Address sender, String group, Address addr, PhysicalAddress phys_addr, String logical_name) {
-        NameCache.add(addr, logical_name);
-        ConcurrentMap<Address,Entry> m=address_mappings.get(group);
-        if(m == null) {
-            ConcurrentMap<Address,Entry> existing=this.address_mappings.putIfAbsent(group, m=new ConcurrentHashMap<>());
-            if(existing != null)
-                m=existing;
-        }
-        m.put(addr, new Entry(sender, phys_addr, logical_name));
-    }
-
-    protected void removeAddressMapping(String group, Address addr) {
-        Map<Address,Entry> m=address_mappings.get(group);
-        if(m == null)
-            return;
-        Entry e=m.get(addr);
-        if(e != null) {
-            if(log.isDebugEnabled())
-                log.debug("removed %s (%s) from group %s", e.logical_name, e.phys_addr, group);
-        }
-        if(m.remove(addr) != null && m.isEmpty())
-            address_mappings.remove(group);
-        output_streams.remove(addr);
-    }
-
-
-    protected void removeFromAddressMappings(Address client_addr) {
-        if(client_addr == null) return;
-        Set<Tuple<String,Address>> suspects=null; // group/address pairs
-        for(Map.Entry<String,ConcurrentMap<Address,Entry>> entry: address_mappings.entrySet()) {
-            ConcurrentMap<Address,Entry> map=entry.getValue();
-            for(Map.Entry<Address,Entry> entry2: map.entrySet()) {
-                Entry e=entry2.getValue();
-                if(client_addr.equals(e.client_addr)) {
-                    map.remove(entry2.getKey());
-                    output_streams.remove(entry2.getKey());
-                    log.debug("connection to %s closed", client_addr);
-                    if(log.isDebugEnabled())
-                        log.debug("removed %s (%s) from group %s", e.logical_name, e.phys_addr, entry.getKey());
-                    if(map.isEmpty())
-                        address_mappings.remove(entry.getKey());
-                    if(suspects == null) suspects=new HashSet<>();
-                    suspects.add(new Tuple<>(entry.getKey(), entry2.getKey()));
-                    break;
-                }
-            }
-        }
-    }
-
-
-    protected void route(String group, Address dest, byte[] msg, int offset, int length) {
-        ConcurrentMap<Address,Entry> map=address_mappings.get(group);
-        if(map == null)
-            return;
-        if(dest != null) { // unicast
-            Entry entry=map.get(dest);
-            if(entry != null)
-                sendToMember(entry.client_addr, msg, offset, length);
-            else
-                log.warn("dest %s in cluster %s not found", dest, group);
-        }
-        else {             // multicast - send to all members in group
-            Set<Map.Entry<Address,Entry>> dests=map.entrySet();
-            sendToAllMembersInGroup(dests, msg, offset, length);
-        }
-    }
-
-    protected void route(String group, Address dest, ByteBuffer buf) {
-        ConcurrentMap<Address,Entry> map=address_mappings.get(group);
-        if(map == null)
-            return;
-        if(dest != null) { // unicast
-            Entry entry=map.get(dest);
-            if(entry != null)
-                sendToMember(entry.client_addr, buf);
-            else
-                log.warn("dest %s in cluster %s not found", dest, group);
-        }
-        else {             // multicast - send to all members in group
-            Set<Map.Entry<Address,Entry>> dests=map.entrySet();
-            sendToAllMembersInGroup(dests, buf);
-        }
-    }
-
-
-
-    protected void sendToAllMembersInGroup(Set<Map.Entry<Address,Entry>> dests, GossipData request) {
-        ByteArrayDataOutputStream out=new ByteArrayDataOutputStream(request.serializedSize());
-        try {
-            request.writeTo(out);
-        }
-        catch(Exception ex) {
-            log.error("failed marshalling gossip data %s: %s; dropping request", request, ex);
-            return;
-        }
-
-        for(Map.Entry<Address,Entry> entry: dests) {
-            Entry e=entry.getValue();
-            if(e == null /* || e.phys_addr == null */)
-                continue;
-
+        @Override
+        public void receive(Message msg) {
             try {
-                server.send(e.client_addr, out.buffer(), 0, out.position());
+
+                System.out.printf("-- received msg from %s: %s\n", msg.src(), msg.getPayload());
+
+                ProtoMessage m=Utils.jgMessageToProto(cluster_name, msg, marshaller);
+                ProtoRequest req=ProtoRequest.newBuilder().setMessage(m).build();
+                send(req);
             }
-            catch(Exception ex) {
-                log.error("failed sending message to %s (%s): %s", e.logical_name, e.phys_addr, ex);
+            catch(Exception e) {
+                throw new RuntimeException(e);
             }
         }
-    }
 
-
-    protected void sendToAllMembersInGroup(Set<Map.Entry<Address,Entry>> dests, byte[] buf, int offset, int len) {
-        for(Map.Entry<Address,Entry> entry: dests) {
-            Entry e=entry.getValue();
-            if(e == null /* || e.phys_addr == null */)
-                continue;
-
+        @Override
+        public void receive(MessageBatch batch) {
+            System.out.printf("-- received msg batch from %s: %d msgs\n", batch.sender(), batch.size());
+            ProtoMessageBatch mb=Utils.jgMessageBatchToProto(batch, marshaller);
+            ProtoRequest req=ProtoRequest.newBuilder().setMessageBatch(mb).build();
             try {
-                server.send(e.client_addr, buf, offset, len);
+                send(req);
             }
-            catch(Exception ex) {
-                log.error("failed sending message to %s (%s): %s", e.logical_name, e.phys_addr, ex);
+            catch(Exception e) {
+                throw new RuntimeException(e);
             }
         }
-    }
 
-    protected void sendToAllMembersInGroup(Set<Map.Entry<Address,Entry>> dests, ByteBuffer buf) {
-        for(Map.Entry<Address,Entry> entry: dests) {
-            Entry e=entry.getValue();
-            if(e == null /* || e.phys_addr == null */)
-                continue;
-
+        @Override
+        public void viewAccepted(View new_view) {
+            ProtoView pv=Utils.jgViewToProtoView(new_view);
+            ProtoRequest req=ProtoRequest.newBuilder().setView(pv).build();
+            ByteArray buf=null;
             try {
-                server.send(e.client_addr, buf.duplicate());
+                send(req);
             }
-            catch(Exception ex) {
-                log.error("failed sending message to %s (%s): %s", e.logical_name, e.phys_addr, ex);
+            catch(Exception e) {
+                log.warn("failed serializing/sending request", e);
             }
         }
     }
-
-
-    protected void sendToMember(Address dest, GossipData request) {
-        ByteArrayDataOutputStream out=new ByteArrayDataOutputStream(request.serializedSize());
-        try {
-            request.writeTo(out);
-            server.send(dest, out.buffer(), 0, out.position());
-        }
-        catch(Exception ex) {
-            log.error("failed sending unicast message to %s: %s", dest, ex);
-        }
-    }
-
-    protected void sendToMember(Address dest, ByteBuffer buf) {
-        try {
-            server.send(dest, buf);
-        }
-        catch(Exception ex) {
-            log.error("failed sending unicast message to %s: %s", dest, ex);
-        }
-    }
-
-    protected void sendToMember(Address dest, byte[] buf, int offset, int len) {
-        try {
-            server.send(dest, buf, offset, len);
-        }
-        catch(Exception ex) {
-            log.error("failed sending unicast message to %s: %s", dest, ex);
-        }
-    }
-
-
-    protected static class Entry {
-        protected final PhysicalAddress phys_addr;
-        protected final String          logical_name;
-        protected final Address         client_addr; // address of the client which registered an item
-
-        public Entry(Address client_addr, PhysicalAddress phys_addr, String logical_name) {
-            this.phys_addr=phys_addr;
-            this.logical_name=logical_name;
-            this.client_addr=client_addr;
-        }
-
-        public String toString() {return String.format("client=%s, name=%s, addr=%s", client_addr, logical_name, phys_addr);}
-    }
-
-
-
 
 
     public static void main(String[] args) throws Exception {
-        int                    port=12501;
+        int                    port=12500;
         int                    recv_buf_size=0, max_length=0;
         long                   expiry_time=0, reaper_interval=0;
         boolean                diag_enabled=true, diag_enable_udp=true, diag_enable_tcp=false;
@@ -566,6 +433,7 @@ public class Server extends ReceiverAdapter implements ConnectionListener, Diagn
         int                    diag_port=7500, diag_port_range=50, diag_ttl=8, soLinger=-1;
         List<NetworkInterface> diag_bind_interfaces=null;
         String                 diag_passcode=null;
+        String                 props="udp.xml", name=null;
 
         // Use bounded queues for sending (https://issues.redhat.com/browse/JGRP-2759)") in TCP (use_nio=false)
         boolean                non_blocking_sends=false;
@@ -575,140 +443,147 @@ public class Server extends ReceiverAdapter implements ConnectionListener, Diagn
 
         TLS tls=new TLS();
         long start=System.currentTimeMillis();
-        String bind_addr=null;
+        InetAddress bind_addr=null;
         boolean jmx=false, nio=false;
 
         for(int i=0; i < args.length; i++) {
-            String arg=args[i];
-            if("-port".equals(arg)) {
+            if("-props".equals(args[i])) {
+                props=args[++i];
+                continue;
+            }
+            if("-name".equals(args[i])) {
+                name=args[++i];
+                continue;
+            }
+            if("-port".equals(args[i])) {
                 port=Integer.parseInt(args[++i]);
                 continue;
             }
-            if("-bindaddress".equals(arg) || "-bind_addr".equals(arg)) {
-                bind_addr=args[++i];
+            if("-bindaddress".equals(args[i]) || "-bind_addr".equals(args[i])) {
+                bind_addr=InetAddress.getByName(args[++i]);
                 continue;
             }
             if("-recv_buf_size".equals(args[i])) {
                 recv_buf_size=Integer.parseInt(args[++i]);
                 continue;
             }
-            if("-expiry".equals(arg)) {
+            if("-expiry".equals(args[i])) {
                 expiry_time=Long.parseLong(args[++i]);
                 continue;
             }
-            if("-reaper_interval".equals(arg)) {
+            if("-reaper_interval".equals(args[i])) {
                 reaper_interval=Long.parseLong(args[++i]);
                 continue;
             }
-            if("-jmx".equals(arg)) {
+            if("-jmx".equals(args[i])) {
                 jmx=Boolean.parseBoolean(args[++i]);
                 continue;
             }
-            if("-solinger".equals(arg)) {
+            if("-solinger".equals(args[i])) {
                 soLinger=Integer.parseInt(args[++i]);
                 continue;
             }
-            if("-nio".equals(arg)) {
+            if("-nio".equals(args[i])) {
                 nio=Boolean.parseBoolean(args[++i]);
                 continue;
             }
-            if("-non_blocking_sends".equals(arg)) {
+            if("-non_blocking_sends".equals(args[i])) {
                 non_blocking_sends=Boolean.parseBoolean(args[++i]);
                 continue;
             }
-            if("max_send_queue".equals(arg)) {
+            if("max_send_queue".equals(args[i])) {
                 max_send_queue=Integer.parseInt(args[++i]);
                 continue;
             }
-            if("-max_length".equals(arg)) {
+            if("-max_length".equals(args[i])) {
                 max_length=Integer.parseInt(args[++i]);
                 continue;
             }
-            if("-diag_enabled".equals(arg)) {
+            if("-diag_enabled".equals(args[i])) {
                 diag_enabled=Boolean.parseBoolean(args[++i]);
                 continue;
             }
-            if("-diag_enable_udp".equals(arg)) {
+            if("-diag_enable_udp".equals(args[i])) {
                 diag_enable_udp=Boolean.parseBoolean(args[++i]);
                 continue;
             }
-            if("-diag_enable_tcp".equals(arg)) {
+            if("-diag_enable_tcp".equals(args[i])) {
                 diag_enable_tcp=Boolean.parseBoolean(args[++i]);
                 continue;
             }
-            if("-diag_mcast_addr".equals(arg)) {
+            if("-diag_mcast_addr".equals(args[i])) {
                 diag_mcast_addr=InetAddress.getByName(args[++i]);
                 continue;
             }
-            if("-diag_bind_addr".equals(arg)) {
+            if("-diag_bind_addr".equals(args[i])) {
                 diag_bind_addr=InetAddress.getByName(args[++i]);
                 continue;
             }
-            if("-diag_port".equals(arg)) {
+            if("-diag_port".equals(args[i])) {
                 diag_port=Integer.parseInt(args[++i]);
                 continue;
             }
-            if("-diag_port_range".equals(arg)) {
+            if("-diag_port_range".equals(args[i])) {
                 diag_port_range=Integer.parseInt(args[++i]);
                 continue;
             }
-            if("-diag_ttl".equals(arg)) {
+            if("-diag_ttl".equals(args[i])) {
                 diag_ttl=Integer.parseInt(args[++i]);
                 continue;
             }
-            if("-diag_bind_interfaces".equals(arg)) {
+            if("-diag_bind_interfaces".equals(args[i])) {
                 diag_bind_interfaces=Util.parseInterfaceList(args[++i]);
                 continue;
             }
-            if("-diag_passcode".equals(arg)) {
+            if("-diag_passcode".equals(args[i])) {
                 diag_passcode=args[++i];
                 continue;
             }
-            if("-tls_protocol".equals(arg)) {
+            if("-tls_protocol".equals(args[i])) {
                 tls.enabled(true).setProtocols(args[++i].split(","));
                 continue;
             }
-            if("-tls_cipher_suites".equals(arg)) {
+            if("-tls_cipher_suites".equals(args[i])) {
                 tls.enabled(true).setCipherSuites(args[++i].split(","));
                 continue;
             }
-            if("-tls_provider".equals(arg)) {
+            if("-tls_provider".equals(args[i])) {
                 tls.enabled(true).setProvider(args[++i]);
                 continue;
             }
-            if("-tls_keystore_path".equals(arg)) {
+            if("-tls_keystore_path".equals(args[i])) {
                 tls.enabled(true).setKeystorePath(args[++i]);
                 continue;
             }
-            if("-tls_keystore_password".equals(arg)) {
+            if("-tls_keystore_password".equals(args[i])) {
                 tls.enabled(true).setKeystorePassword(args[++i]);
                 continue;
             }
-            if("-tls_keystore_type".equals(arg)) {
+            if("-tls_keystore_type".equals(args[i])) {
                 tls.enabled(true).setKeystoreType(args[++i]);
                 continue;
             }
-            if("-tls_keystore_alias".equals(arg)) {
+            if("-tls_keystore_alias".equals(args[i])) {
                 tls.enabled(true).setKeystoreAlias(args[++i]);
                 continue;
             }
-            if("-tls_truststore_path".equals(arg)) {
+            if("-tls_truststore_path".equals(args[i])) {
                 tls.enabled(true).setTruststorePath(args[++i]);
                 continue;
             }
-            if("-tls_truststore_password".equals(arg)) {
+            if("-tls_truststore_password".equals(args[i])) {
                 tls.enabled(true).setTruststorePassword(args[++i]);
                 continue;
             }
-            if("-tls_truststore_type".equals(arg)) {
+            if("-tls_truststore_type".equals(args[i])) {
                 tls.enabled(true).setTruststoreType(args[++i]);
                 continue;
             }
-            if("-tls_client_auth".equals(arg)) {
+            if("-tls_client_auth".equals(args[i])) {
                 tls.enabled(true).setClientAuth(TLSClientAuth.valueOf(args[++i].toUpperCase()));
                 continue;
             }
-            if("-tls_sni_matcher".equals(arg)) {
+            if("-tls_sni_matcher".equals(args[i])) {
                 tls.enabled(true).getSniMatchers().add(SNIHostName.createSNIMatcher(args[++i]));
                 continue;
             }
@@ -718,14 +593,12 @@ public class Server extends ReceiverAdapter implements ConnectionListener, Diagn
         if(tls.enabled() && nio)
             throw new IllegalArgumentException("Cannot use NIO with TLS");
 
-        Server router=new Server(bind_addr, port)
+        JChannelServer server=new JChannelServer(bind_addr, port, props)
+          .name(name)
           .jmx(jmx).expiryTime(expiry_time).reaperInterval(reaper_interval)
-          .useNio(nio)
-          .recvBufferSize(recv_buf_size)
-          .lingerTimeout(soLinger)
-          .maxLength(max_length)
+          .useNio(nio).recvBufferSize(recv_buf_size).lingerTimeout(soLinger).maxLength(max_length)
           .tls(tls).nonBlockingSends(non_blocking_sends).maxSendQueue(max_send_queue);
-        router.diagHandler().setEnabled(diag_enabled)
+        server.diagHandler().setEnabled(diag_enabled)
           .enableUdp(diag_enable_udp)
           .enableTcp(diag_enable_tcp)
           .setMcastAddress(diag_mcast_addr)
@@ -740,14 +613,14 @@ public class Server extends ReceiverAdapter implements ConnectionListener, Diagn
             tls.init();
             SSLContext context=tls.createContext();
             SocketFactory socket_factory=tls.createSocketFactory(context);
-            router.socketFactory(socket_factory);
+            server.socketFactory(socket_factory);
             type=String.format(" (%s/%s)", tls.getProtocols()!=null?String.join(",",tls.getProtocols()):"TLS",
                                context.getProvider());
         }
-        router.start();
+        server.start();
         long time=System.currentTimeMillis()-start;
-        IpAddress local=(IpAddress)router.localAddress();
-        System.out.printf("\nJGroupsServer started in %d ms listening on %s:%s%s\n",
+        IpAddress local=(IpAddress)server.localAddress();
+        System.out.printf("\nJChannelServer started in %d ms listening on %s:%s%s\n",
                           time, bind_addr != null? bind_addr : "0.0.0.0",  local.getPort(), type);
     }
 
@@ -755,8 +628,8 @@ public class Server extends ReceiverAdapter implements ConnectionListener, Diagn
 
     static void help() {
         System.out.println();
-        System.out.println("JGroupsServer [-port <port>] [-bind_addr <address>] [options]");
-        System.out.println();
+        System.out.println("JChannelServer [-port <port>] [-bind_addr <address>] [-props <config>] [-name <name>]" +
+                             " [options]\n");
         System.out.println("Options:");
         System.out.println();
         System.out.println("    -jmx <true|false>       - Expose attributes and operations via JMX.\n");
