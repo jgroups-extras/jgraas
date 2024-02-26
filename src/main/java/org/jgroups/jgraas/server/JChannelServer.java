@@ -293,7 +293,7 @@ public class JChannelServer extends ReceiverAdapter implements ConnectionListene
                 channel.disconnect();
                 break;
             case VIEW:
-                break;
+                throw new IllegalStateException("server cannot receive views");
             case EXCEPTION:
                 break;
             default:
@@ -384,9 +384,7 @@ public class JChannelServer extends ReceiverAdapter implements ConnectionListene
         @Override
         public void receive(Message msg) {
             try {
-
                 System.out.printf("-- received msg from %s: %s\n", msg.src(), msg.getPayload());
-
                 ProtoMessage m=Utils.jgMessageToProto(cluster_name, msg, marshaller);
                 ProtoRequest req=ProtoRequest.newBuilder().setMessage(m).build();
                 send(req);
@@ -413,7 +411,6 @@ public class JChannelServer extends ReceiverAdapter implements ConnectionListene
         public void viewAccepted(View new_view) {
             ProtoView pv=Utils.jgViewToProtoView(new_view);
             ProtoRequest req=ProtoRequest.newBuilder().setView(pv).build();
-            ByteArray buf=null;
             try {
                 send(req);
             }

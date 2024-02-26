@@ -173,18 +173,6 @@ public class JChannelClient implements Receiver {
         });
     }
 
-
-    public void send(ByteArray buf) { // todo: only for testing; remove again!
-        stub_mgr.forAny(st -> {
-            try {
-                st.send(buf);
-            }
-            catch(Exception e) {
-                throw new RuntimeException(e);
-            }
-        });
-    }
-
     @Override public void receive(Address sender, byte[] buf, int offset, int length) {
         receive(sender, ByteBuffer.wrap(buf, offset, length));
     }
@@ -234,8 +222,9 @@ public class JChannelClient implements Receiver {
                 }
                 break;
             case JOIN_REQ:
+                throw new IllegalStateException("join request not handled by client");
             case LEAVE_REQ:
-                break;
+                throw new IllegalStateException("leave request not handled by client");
             case VIEW:
                 org.jgroups.View view=Utils.protoViewToJGView(req.getView());
                 System.out.printf("-- view: %s\n", view);
