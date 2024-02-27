@@ -22,15 +22,14 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Implementation of {@link org.jgroups.JChannel} forwarding requests to a remote
- * {@link JChannelServer}. {@link ClientStubManager} is used to forward requests to the server, and
- * translate receive requests from the server.
+ * Implementation of {@link org.jgroups.JChannel} forwarding requests to a remote {@link JChannelServer}.
+ * {@link ClientStubManager} is used to forward requests to the server, and translate received messages from the server
  * process
  * @author Bela Ban
  * @since  5.3.3
  */
 @MBean(description="JChannel stub forwarding requests to a remote JGraaS server")
-public class JChannelClient implements Receiver {
+public class JChannelStub implements Receiver {
 
     @Property(description = "Interval in msec to attempt connecting back to router in case of closed connection",
       type= AttributeType.TIME)
@@ -77,34 +76,34 @@ public class JChannelClient implements Receiver {
     protected final MessageFactory    msg_factory=new DefaultMessageFactory();
     protected Marshaller              marshaller;
 
-    public long           getReconnectInterval()       {return reconnect_interval;}
-    public JChannelClient setReconnectInterval(long r) {this.reconnect_interval=r; return this;}
-    public boolean        isTcpNodelay()               {return tcp_nodelay;}
-    public JChannelClient setTcpNodelay(boolean nd)    {this.tcp_nodelay=nd;return this;}
-    public boolean        useNio()                     {return use_nio;}
-    public JChannelClient useNio(boolean use_nio)      {this.use_nio=use_nio; return this;}
-    public int            getPortRange()               {return port_range;}
-    public JChannelClient setPortRange(int r)          {port_range=r; return this;}
-    public TLS            tls()                        {return tls;}
-    public JChannelClient tls(TLS t)                   {this.tls=t; return this;}
-    public int            getLinger()                  {return linger;}
-    public JChannelClient setLinger(int l)             {this.linger=l; return this;}
-    public boolean        nonBlockingSends()           {return non_blocking_sends;}
-    public JChannelClient nonBlockingSends(boolean b)  {this.non_blocking_sends=b; return this;}
-    public int            maxSendQueue()               {return max_send_queue;}
-    public JChannelClient maxSendQueue(int s)          {this.max_send_queue=s; return this;}
-    public Marshaller     marshaller()                 {return marshaller;}
-    public JChannelClient marshaller(Marshaller m)     {this.marshaller=m; return this;}
+    public long         getReconnectInterval()       {return reconnect_interval;}
+    public JChannelStub setReconnectInterval(long r) {this.reconnect_interval=r; return this;}
+    public boolean      isTcpNodelay()               {return tcp_nodelay;}
+    public JChannelStub setTcpNodelay(boolean nd)    {this.tcp_nodelay=nd;return this;}
+    public boolean      useNio()                     {return use_nio;}
+    public JChannelStub useNio(boolean use_nio)      {this.use_nio=use_nio; return this;}
+    public int          getPortRange()               {return port_range;}
+    public JChannelStub setPortRange(int r)          {port_range=r; return this;}
+    public TLS          tls()                        {return tls;}
+    public JChannelStub tls(TLS t)                   {this.tls=t; return this;}
+    public int          getLinger()                  {return linger;}
+    public JChannelStub setLinger(int l)             {this.linger=l; return this;}
+    public boolean      nonBlockingSends()           {return non_blocking_sends;}
+    public JChannelStub nonBlockingSends(boolean b)  {this.non_blocking_sends=b; return this;}
+    public int          maxSendQueue()               {return max_send_queue;}
+    public JChannelStub maxSendQueue(int s)          {this.max_send_queue=s; return this;}
+    public Marshaller   marshaller()                 {return marshaller;}
+    public JChannelStub marshaller(Marshaller m)     {this.marshaller=m; return this;}
 
-    public JChannelClient() {
+    public JChannelStub() {
         this(null);
     }
 
-    public JChannelClient(TimeScheduler timer) {
+    public JChannelStub(TimeScheduler timer) {
         this.timer=timer;
     }
 
-    public JChannelClient addServer(InetAddress addr, int port) {
+    public JChannelStub addServer(InetAddress addr, int port) {
         servers.add(new InetSocketAddress(addr, port));
         return this;
     }
@@ -237,56 +236,5 @@ public class JChannelClient implements Receiver {
         }
     }
 
-    protected void disconnectStub() {
-        stub_mgr.disconnectStubs();
-    }
-
-    public static void main(String[] args) throws Exception {
-        InetAddress server_addr=InetAddress.getLocalHost();
-        int port=12500;
-
-        for(int i=0; i < args.length; i++) {
-            if("-server".equals(args[i])) {
-                server_addr=InetAddress.getByName(args[++i]);
-                continue;
-            }
-            if("-port".equals(args[i])) {
-                port=Integer.parseInt(args[++i]);
-                continue;
-            }
-            System.out.printf("%s [-server <address>] [-port <port>]\n", JChannelClient.class.getSimpleName());
-            return;
-        }
-
-        JChannelClient client=new JChannelClient().setPortRange(0).addServer(server_addr, port);
-        client.init();
-        client.start();
-        client.connect("cluster");
-
-        BufferedReader in=new BufferedReader(new InputStreamReader(System.in));
-        while(true) {
-            try {
-                System.out.print("> "); System.out.flush();
-                String line=in.readLine();
-                line=line != null? line.toLowerCase() : null;
-                if(line == null)
-                    continue;
-                if(line.startsWith("quit") || line.startsWith("exit"))
-                    break;
-                org.jgroups.Message msg=new ObjectMessage(null, line);
-                ProtoMessage m=Utils.jgMessageToProto("cluster", msg, null);
-                ProtoRequest req=ProtoRequest.newBuilder().setMessage(m).build();
-                client.send(req);
-            }
-            catch(IOException | IllegalArgumentException io_ex) {
-                break;
-            }
-            catch(Exception ex) {
-                ex.printStackTrace();
-            }
-        }
-        client.disconnect("cluster");
-        client.destroy();
-    }
 
 }
