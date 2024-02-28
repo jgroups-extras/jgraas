@@ -3,6 +3,7 @@ package org.jgroups.jgraas.client;
 import org.jgroups.*;
 import org.jgroups.annotations.Component;
 import org.jgroups.annotations.MBean;
+import org.jgroups.annotations.ManagedAttribute;
 import org.jgroups.annotations.Property;
 import org.jgroups.blocks.cs.Receiver;
 import org.jgroups.conf.AttributeType;
@@ -70,13 +71,16 @@ public class JChannelStub extends JChannel implements Receiver {
     @Component(name="tls",description="Contains the attributes for TLS (SSL sockets) when enabled=true")
     protected TLS     tls=new TLS();
 
-    protected TimeScheduler           timer;
+    @ManagedAttribute(description="The physical address of the remote server (cached on connect())")
+    protected Address physical_addr;
+
+    protected TimeScheduler              timer;
     // list of 1 server, when upgrading, a second server might be present
-    protected List<InetSocketAddress> servers=new ArrayList<>();
-    protected SocketFactory           socket_factory;
-    protected ClientStubManager       stub_mgr;
-    protected final MessageFactory    msg_factory=new DefaultMessageFactory();
-    protected Marshaller              marshaller;
+    protected List<InetSocketAddress>    servers=new ArrayList<>();
+    protected SocketFactory              socket_factory;
+    protected ClientStubManager          stub_mgr;
+    protected final MessageFactory       msg_factory=new DefaultMessageFactory();
+    protected Marshaller                 marshaller;
     protected Promise<ProtoJoinResponse> join_rsp=new Promise<>();
 
     public long         getReconnectInterval()       {return reconnect_interval;}
@@ -98,6 +102,7 @@ public class JChannelStub extends JChannel implements Receiver {
     public Marshaller   marshaller()                 {return marshaller;}
     public JChannelStub marshaller(Marshaller m)     {this.marshaller=m; return this;}
     public JChannelStub timer(TimeScheduler t)       {this.timer=t; return this;}
+    public Address      physicalAddress()            {return physical_addr;}
 
 
     public JChannelStub(boolean ignored) throws Exception {
@@ -182,6 +187,17 @@ public class JChannelStub extends JChannel implements Receiver {
         return this;
     }
 
+    @Override
+    public Object down(Event evt) {
+        if(Event.GET_PHYSICAL_ADDRESS == evt.type())
+            return physical_addr;
+        return notImplemented("down(Event)");
+    }
+
+    @Override
+    public Object down(Message msg) {
+        return super.down(msg);
+    }
 
     @Override
     protected synchronized JChannel connect(String cluster_name, boolean useFlushIfPresent) throws Exception {
@@ -190,14 +206,12 @@ public class JChannelStub extends JChannel implements Receiver {
 
     @Override
     public synchronized JChannel connect(String cluster_name, Address target, long timeout) throws Exception {
-        notImplemented("connect() with state transfer");
-        return null;
+        return (JChannel)notImplemented("connect() with state transfer");
     }
 
     @Override
     public synchronized JChannel connect(String cluster_name, Address target, long timeout, boolean useFlushIfPresent) throws Exception {
-        notImplemented("connect() with state transfer");
-        return null;
+        return (JChannel)notImplemented("connect() with state transfer");
     }
 
     public JChannelStub connect(String cluster) throws Exception {
@@ -212,6 +226,7 @@ public class JChannelStub extends JChannel implements Receiver {
             this.local_addr=Utils.protoAddressToJGAddress(rsp.getLocalAddress());
         this.name=rsp.getName();
         this.cluster_name=rsp.getCluster();
+        this.physical_addr=Utils.protoIpAddressToJG(rsp.getIpAddr());
         state=State.CONNECTED;
         notifyChannelConnected(this);
         return this;
@@ -315,7 +330,7 @@ public class JChannelStub extends JChannel implements Receiver {
         }
     }
 
-    protected static void notImplemented(String method) {
+    protected static Object notImplemented(String method) {
         // log.warn("method %s is not implemented in %s", method, JChannelStub.class.getSimpleName());
         String message=String.format("method %s is not implemented in %s", method, JChannelStub.class.getSimpleName());
         throw new IllegalArgumentException(message);

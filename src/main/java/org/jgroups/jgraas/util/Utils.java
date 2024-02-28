@@ -8,11 +8,14 @@ import org.jgroups.jgraas.common.*;
 import org.jgroups.protocols.FORK;
 import org.jgroups.protocols.relay.SiteMaster;
 import org.jgroups.protocols.relay.SiteUUID;
+import org.jgroups.stack.IpAddress;
 import org.jgroups.util.*;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.PrintStream;
+import java.net.InetAddress;
+import java.net.UnknownHostException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -46,7 +49,7 @@ public class Utils {
     }
 
     public static MessageBatch protoMessageBatchToJG(ProtoMessageBatch batch, MessageFactory msg_factory,
-                                                     Marshaller marshaller) {
+                                                     Marshaller marshaller) throws UnknownHostException {
         List<ProtoMessage> msgs=batch.getMsgsList();
         Address dest=Utils.protoAddressToJGAddress(batch.getDestination()), sender=protoAddressToJGAddress(batch.getSender());
         String tmp=batch.getClusterName();
@@ -215,13 +218,18 @@ public class Utils {
     public static ProtoAddress jgAddressToProtoAddress(Address jg_addr) {
         if(jg_addr == null)
             return ProtoAddress.newBuilder().build();
-        if(!(jg_addr instanceof UUID))
-            throw new IllegalArgumentException(String.format("JGroups address has to be of type UUID but is %s",
-                                                             jg_addr.getClass().getSimpleName()));
-        UUID uuid=(UUID)jg_addr;
-        String name=jg_addr instanceof SiteUUID? ((SiteUUID)jg_addr).getName() : NameCache.get(jg_addr);
+        //if(!(jg_addr instanceof UUID))
+          //  throw new IllegalArgumentException(String.format("JGroups address has to be of type UUID but is %s",
+            //                                                 jg_addr.getClass().getSimpleName()));
 
         ProtoAddress.Builder addr_builder=ProtoAddress.newBuilder();
+        if(jg_addr instanceof IpAddress) {
+            ProtoIpAddress proto_addr=ipAddressToProto((IpAddress)jg_addr);
+            return addr_builder.setIpAddr(proto_addr).build();
+        }
+
+        UUID uuid=(UUID)jg_addr;
+        String name=jg_addr instanceof SiteUUID? ((SiteUUID)jg_addr).getName() : NameCache.get(jg_addr);
         ProtoUUID pbuf_uuid=ProtoUUID.newBuilder().setLeastSig(uuid.getLeastSignificantBits())
           .setMostSig(uuid.getMostSignificantBits()).build();
 
@@ -242,14 +250,29 @@ public class Utils {
         return addr_builder.build();
     }
 
-    public static Address protoAddressToJGAddress(ProtoAddress pbuf_addr) {
-        if(pbuf_addr == null)
+    public static ProtoIpAddress ipAddressToProto(IpAddress addr) {
+        InetAddress inet=addr.getIpAddress();
+        byte[] buf=inet != null? inet.getAddress() : null;
+        ByteString bs=buf != null? ByteString.copyFrom(buf) : null;
+        return ProtoIpAddress.newBuilder().setAddress(bs).setPort(addr.getPort()).build();
+    }
+
+    public static IpAddress protoIpAddressToJG(ProtoIpAddress addr) throws UnknownHostException {
+        byte[] buf=addr.getAddress().toByteArray();
+        return new IpAddress(InetAddress.getByAddress(buf), addr.getPort());
+    }
+
+    public static Address protoAddressToJGAddress(ProtoAddress proto_addr) throws UnknownHostException {
+        if(proto_addr == null)
             return null;
 
-        String logical_name=pbuf_addr.getName();
+        String logical_name=proto_addr.getName();
         Address retval=null;
-        if(pbuf_addr.hasSiteUuid()) {
-            ProtoSiteUUID pbuf_site_uuid=pbuf_addr.getSiteUuid();
+
+        if(proto_addr.hasIpAddr())
+            retval=protoIpAddressToJG(proto_addr.getIpAddr());
+        else if(proto_addr.hasSiteUuid()) {
+            ProtoSiteUUID pbuf_site_uuid=proto_addr.getSiteUuid();
             String site_name=pbuf_site_uuid.getSiteName();
             if(pbuf_site_uuid.getIsSiteMaster())
                 retval=new SiteMaster(site_name);
@@ -258,8 +281,8 @@ public class Utils {
                 retval=new SiteUUID(most, least, logical_name, site_name);
             }
         }
-        else if(pbuf_addr.hasUuid()) {
-            ProtoUUID pbuf_uuid=pbuf_addr.getUuid();
+        else if(proto_addr.hasUuid()) {
+            ProtoUUID pbuf_uuid=proto_addr.getUuid();
             retval=new UUID(pbuf_uuid.getMostSig(), pbuf_uuid.getLeastSig());
         }
 
@@ -281,11 +304,15 @@ public class Utils {
         return ProtoViewId.newBuilder().setCreator(coord).setId(view_id.getId()).build();
     }
 
-    public static View protoViewToJGView(ProtoView v) {
+    public static View protoViewToJGView(ProtoView v) throws UnknownHostException {
         ProtoViewId vid=v.getViewId();
         List<ProtoAddress> pbuf_mbrs=v.getMemberList();
         ViewId jg_vid=new ViewId(protoAddressToJGAddress(vid.getCreator()), vid.getId());
-        List<Address> members=pbuf_mbrs.stream().map(Utils::protoAddressToJGAddress).collect(Collectors.toList());
+        List<Address> members=new ArrayList<>();
+        for(ProtoAddress pbuf_mbr: pbuf_mbrs) {
+            Address address=protoAddressToJGAddress(pbuf_mbr);
+            members.add(address);
+        }
         return new View(jg_vid, members);
     }
 

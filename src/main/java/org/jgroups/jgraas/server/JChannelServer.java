@@ -301,16 +301,17 @@ public class JChannelServer extends ReceiverAdapter implements ConnectionListene
         this.cluster_name=cluster;
         this.name=name;
         channel.setName(name);
-        ProtoJoinResponse.Builder join_rsp_builder=ProtoJoinResponse.newBuilder();
+        ProtoJoinResponse.Builder builder=ProtoJoinResponse.newBuilder();
         try {
             channel.connect(cluster_name);
-            join_rsp_builder.setCluster(channel.clusterName())
-              .setLocalAddress(Utils.jgAddressToProtoAddress(channel.address())).setName(channel.name());
+            IpAddress ip_addr=(IpAddress)channel.down(new Event(Event.GET_PHYSICAL_ADDRESS, channel.address()));
+            builder.setCluster(channel.clusterName()).setLocalAddress(Utils.jgAddressToProtoAddress(channel.address()))
+              .setName(channel.name()).setIpAddr(Utils.ipAddressToProto(ip_addr));
         }
         catch(Exception ex) {
-            join_rsp_builder.setEx(Utils.exceptionToProto(ex));
+            builder.setEx(Utils.exceptionToProto(ex));
         }
-        ProtoRequest req=ProtoRequest.newBuilder().setJoinRsp(join_rsp_builder.build()).build();
+        ProtoRequest req=ProtoRequest.newBuilder().setJoinRsp(builder.build()).build();
         send(req);
     }
 
