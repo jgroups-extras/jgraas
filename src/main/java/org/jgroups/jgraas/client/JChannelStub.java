@@ -71,6 +71,10 @@ public class JChannelStub extends JChannel implements Receiver {
     @Component(name="tls",description="Contains the attributes for TLS (SSL sockets) when enabled=true")
     protected TLS     tls=new TLS();
 
+    @Property(description="Time (ms) to wait on connect() until a response has been received from the server. If no " +
+      "response is received, a TimeoutException will be thrown")
+    protected long    join_timeout=3000;
+
     @ManagedAttribute(description="The physical address of the remote server (cached on connect())")
     protected Address physical_addr;
 
@@ -103,36 +107,46 @@ public class JChannelStub extends JChannel implements Receiver {
     public JChannelStub marshaller(Marshaller m)     {this.marshaller=m; return this;}
     public JChannelStub timer(TimeScheduler t)       {this.timer=t; return this;}
     public Address      physicalAddress()            {return physical_addr;}
+    public long         joinTimeout()                {return join_timeout;}
+    public JChannelStub joinTimeout(long t)          {join_timeout=t; return this;}
 
 
     public JChannelStub(boolean ignored) throws Exception {
+        super(false);
         notImplemented("JChannelStub(boolean)");
     }
 
     public JChannelStub() throws Exception {
+        super(false);
     }
 
     public JChannelStub(String ignored) throws Exception {
+        super(false);
         notImplemented("JChannelStub(String)");
     }
 
     public JChannelStub(InputStream ignored) throws Exception {
+        super(false);
         notImplemented("JChannelStub(InputStream)");
     }
 
     public JChannelStub(ProtocolStackConfigurator ignored) throws Exception {
+        super(false);
         notImplemented("JChannelStub(ProtocolStackConfigurator)");
     }
 
     public JChannelStub(Protocol... ignored) throws Exception {
+        super(false);
         notImplemented("JChannelStub(Protocol...)");
     }
 
     public JChannelStub(List<Protocol> ignored) throws Exception {
+        super(false);
         notImplemented("JChannelStub(List<Protocol>)");
     }
 
     public JChannelStub(InetSocketAddress srv) throws Exception {
+        super(false);
         addServer(srv);
     }
 
@@ -148,6 +162,14 @@ public class JChannelStub extends JChannel implements Receiver {
 
     public JChannelStub clearServerList() {
         servers.clear();
+        return this;
+    }
+
+    @Override
+    protected JChannelStub init() {
+        super.init();
+        physical_addr=null;
+        name=null;
         return this;
     }
 
@@ -189,14 +211,27 @@ public class JChannelStub extends JChannel implements Receiver {
 
     @Override
     public Object down(Event evt) {
-        if(Event.GET_PHYSICAL_ADDRESS == evt.type())
-            return physical_addr;
-        return notImplemented("down(Event)");
+        switch(evt.type()) {
+            case Event.GET_PHYSICAL_ADDRESS:
+                return physical_addr;
+            case Event.REMOVE_ADDRESS:
+                return null; // no-op: we don't have a transport
+            case Event.DISCONNECT:
+                return null; // no GMS protocol (no stack) available
+        }
+        log.warn("%s: event %s is not implemented", local_addr, Event.type2String(evt.type()));
+        return null;
     }
 
     @Override
     public Object down(Message msg) {
-        return super.down(msg);
+        try {
+            send(msg);
+        }
+        catch(Exception e) {
+            log.error("%s: failed sending message: %s", local_addr, e);
+        }
+        return null;
     }
 
     @Override
@@ -221,7 +256,7 @@ public class JChannelStub extends JChannel implements Receiver {
         ProtoRequest req=ProtoRequest.newBuilder().setJoinReq(builder.build()).build();
         join_rsp.reset(true);
         send(req);
-        ProtoJoinResponse rsp=join_rsp.getResultWithTimeout(3000, true);
+        ProtoJoinResponse rsp=join_rsp.getResultWithTimeout(join_timeout, true);
         if(rsp.hasLocalAddress())
             this.local_addr=Utils.protoAddressToJGAddress(rsp.getLocalAddress());
         this.name=rsp.getName();
@@ -232,10 +267,12 @@ public class JChannelStub extends JChannel implements Receiver {
         return this;
     }
 
+    @Override
     public JChannelStub disconnect() {
         ProtoRequest req=ProtoRequest.newBuilder().setLeaveReq(ProtoLeaveRequest.newBuilder()).build();
         try {
             send(req);
+            super.disconnect();
         }
         catch(Exception ex) {
             log.error("%s: disconnect failed: %s", local_addr, ex);
@@ -328,6 +365,11 @@ public class JChannelStub extends JChannel implements Receiver {
                 log.warn("request %s not known", c);
                 break;
         }
+    }
+
+    @Override
+    protected JChannelStub stopStack(boolean stop, boolean destroy) {
+        return this;
     }
 
     protected static Object notImplemented(String method) {

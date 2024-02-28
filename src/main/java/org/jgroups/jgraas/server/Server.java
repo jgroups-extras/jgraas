@@ -23,7 +23,7 @@ public class Server {
         int                    recv_buf_size=0, max_length=0;
         long                   expiry_time=0, reaper_interval=0;
         boolean                diag_enabled=true, diag_enable_udp=true, diag_enable_tcp=false;
-        InetAddress diag_mcast_addr=null, diag_bind_addr=null;
+        InetAddress            diag_mcast_addr=null, diag_bind_addr=null;
         int                    diag_port=7500, diag_port_range=50, diag_ttl=8, soLinger=-1;
         List<NetworkInterface> diag_bind_interfaces=null;
         String                 diag_passcode=null;

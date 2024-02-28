@@ -40,6 +40,11 @@ public class Client implements Receiver, Closeable {
                     continue;
                 if(line.startsWith("quit") || line.startsWith("exit"))
                     break;
+                if(line.startsWith("dump")) {
+                    System.out.printf("%s (%s) cluster: \"%s\" view: %s\n", stub.getAddress(), stub.physicalAddress(),
+                                      stub.clusterName(), stub.view());
+                    continue;
+                }
                 Message msg=new ObjectMessage(null, line);
                 stub.send(msg);
             }
