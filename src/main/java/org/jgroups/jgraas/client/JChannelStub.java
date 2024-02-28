@@ -6,15 +6,17 @@ import org.jgroups.annotations.MBean;
 import org.jgroups.annotations.Property;
 import org.jgroups.blocks.cs.Receiver;
 import org.jgroups.conf.AttributeType;
+import org.jgroups.conf.ProtocolStackConfigurator;
 import org.jgroups.jgraas.common.*;
 import org.jgroups.jgraas.server.JChannelServer;
 import org.jgroups.jgraas.util.Utils;
-import org.jgroups.logging.Log;
-import org.jgroups.logging.LogFactory;
-import org.jgroups.util.*;
+import org.jgroups.stack.Protocol;
 import org.jgroups.util.ByteArray;
+import org.jgroups.util.*;
 
-import java.io.*;
+import java.io.ByteArrayInputStream;
+import java.io.DataInput;
+import java.io.InputStream;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
@@ -29,7 +31,7 @@ import java.util.List;
  * @since  5.3.3
  */
 @MBean(description="JChannel stub forwarding requests to a remote JGraaS server")
-public class JChannelStub implements Receiver {
+public class JChannelStub extends JChannel implements Receiver {
 
     @Property(description = "Interval in msec to attempt connecting back to router in case of closed connection",
       type= AttributeType.TIME)
@@ -68,13 +70,14 @@ public class JChannelStub implements Receiver {
     @Component(name="tls",description="Contains the attributes for TLS (SSL sockets) when enabled=true")
     protected TLS     tls=new TLS();
 
-    protected final Log               log=LogFactory.getLog(getClass());
     protected TimeScheduler           timer;
+    // list of 1 server, when upgrading, a second server might be present
     protected List<InetSocketAddress> servers=new ArrayList<>();
     protected SocketFactory           socket_factory;
     protected ClientStubManager       stub_mgr;
     protected final MessageFactory    msg_factory=new DefaultMessageFactory();
     protected Marshaller              marshaller;
+    protected Promise<ProtoJoinResponse> join_rsp=new Promise<>();
 
     public long         getReconnectInterval()       {return reconnect_interval;}
     public JChannelStub setReconnectInterval(long r) {this.reconnect_interval=r; return this;}
@@ -94,13 +97,38 @@ public class JChannelStub implements Receiver {
     public JChannelStub maxSendQueue(int s)          {this.max_send_queue=s; return this;}
     public Marshaller   marshaller()                 {return marshaller;}
     public JChannelStub marshaller(Marshaller m)     {this.marshaller=m; return this;}
+    public JChannelStub timer(TimeScheduler t)       {this.timer=t; return this;}
 
-    public JChannelStub() {
-        this(null);
+
+    public JChannelStub(boolean ignored) throws Exception {
+        notImplemented("JChannelStub(boolean)");
     }
 
-    public JChannelStub(TimeScheduler timer) {
-        this.timer=timer;
+    public JChannelStub() throws Exception {
+    }
+
+    public JChannelStub(String ignored) throws Exception {
+        notImplemented("JChannelStub(String)");
+    }
+
+    public JChannelStub(InputStream ignored) throws Exception {
+        notImplemented("JChannelStub(InputStream)");
+    }
+
+    public JChannelStub(ProtocolStackConfigurator ignored) throws Exception {
+        notImplemented("JChannelStub(ProtocolStackConfigurator)");
+    }
+
+    public JChannelStub(Protocol... ignored) throws Exception {
+        notImplemented("JChannelStub(Protocol...)");
+    }
+
+    public JChannelStub(List<Protocol> ignored) throws Exception {
+        notImplemented("JChannelStub(List<Protocol>)");
+    }
+
+    public JChannelStub(InetSocketAddress srv) throws Exception {
+        addServer(srv);
     }
 
     public JChannelStub addServer(InetAddress addr, int port) {
@@ -108,7 +136,18 @@ public class JChannelStub implements Receiver {
         return this;
     }
 
-    public void init() throws Exception {
+    public JChannelStub addServer(InetSocketAddress addr) {
+        servers.add(addr);
+        return this;
+    }
+
+    public JChannelStub clearServerList() {
+        servers.clear();
+        return this;
+    }
+
+    /** Creates the connection to the remote server */
+    public JChannelStub connectToRemote() throws Exception {
         if(timer == null) {
             ThreadFactory thread_factory=new DefaultThreadFactory("client-stub", true);
             timer=new TimeScheduler3(thread_factory, 1, 5, 30000, 200, "abort");
@@ -117,23 +156,21 @@ public class JChannelStub implements Receiver {
             socket_factory=tls.createSocketFactory();
         else
             socket_factory=new DefaultSocketFactory();
-        if(server_list != null)
-            servers.addAll(Util.parseCommaDelimitedHosts2(server_list, port_range));
-        stub_mgr=ClientStubManager.emptyClientStubManager(log, timer).useNio(this.use_nio)
-          .nonBlockingSends(non_blocking_sends).maxSendQueue(max_send_queue);
-    }
-
-    public void start() throws Exception {
-     //    super.start();
-
+        if(server_list != null) {
+            try {
+                servers.addAll(Util.parseCommaDelimitedHosts2(server_list, port_range));
+            }
+            catch(Exception ex) {
+                throw new IllegalArgumentException(ex);
+            }
+        }
         stub_mgr=new ClientStubManager(log, timer, reconnect_interval)
           .useNio(this.use_nio).socketFactory(socket_factory).heartbeat(heartbeat_interval, heartbeat_timeout)
           .nonBlockingSends(non_blocking_sends).maxSendQueue(max_send_queue);
         for(InetSocketAddress srv: servers) {
             InetSocketAddress target=null;
             try {
-                target=srv.isUnresolved()? new InetSocketAddress(srv.getHostString(), srv.getPort())
-                  : new InetSocketAddress(srv.getAddress(), srv.getPort());
+                target=srv.isUnresolved()? new InetSocketAddress(srv.getHostString(), srv.getPort()) : srv;
                 stub_mgr.createAndRegisterStub(new InetSocketAddress((InetAddress)null, 0), target, linger)
                   .receiver(this).tcpNoDelay(tcp_nodelay);
             }
@@ -142,34 +179,77 @@ public class JChannelStub implements Receiver {
             }
         }
         stub_mgr.connectStubs();
+        return this;
     }
 
-    public void destroy() {
+
+    @Override
+    protected synchronized JChannel connect(String cluster_name, boolean useFlushIfPresent) throws Exception {
+        return connect(cluster_name);
+    }
+
+    @Override
+    public synchronized JChannel connect(String cluster_name, Address target, long timeout) throws Exception {
+        notImplemented("connect() with state transfer");
+        return null;
+    }
+
+    @Override
+    public synchronized JChannel connect(String cluster_name, Address target, long timeout, boolean useFlushIfPresent) throws Exception {
+        notImplemented("connect() with state transfer");
+        return null;
+    }
+
+    public JChannelStub connect(String cluster) throws Exception {
+        ProtoJoinRequest.Builder builder=ProtoJoinRequest.newBuilder().setClusterName(cluster);
+        if(name != null)
+            builder.setName(name);
+        ProtoRequest req=ProtoRequest.newBuilder().setJoinReq(builder.build()).build();
+        join_rsp.reset(true);
+        send(req);
+        ProtoJoinResponse rsp=join_rsp.getResultWithTimeout(3000, true);
+        if(rsp.hasLocalAddress())
+            this.local_addr=Utils.protoAddressToJGAddress(rsp.getLocalAddress());
+        this.name=rsp.getName();
+        this.cluster_name=rsp.getCluster();
+        state=State.CONNECTED;
+        notifyChannelConnected(this);
+        return this;
+    }
+
+    public JChannelStub disconnect() {
+        ProtoRequest req=ProtoRequest.newBuilder().setLeaveReq(ProtoLeaveRequest.newBuilder()).build();
+        try {
+            send(req);
+        }
+        catch(Exception ex) {
+            log.error("%s: disconnect failed: %s", local_addr, ex);
+        }
+        return this;
+    }
+
+    public void close() {
+        super.close();
         if(stub_mgr != null)
             stub_mgr.destroyStubs();
-        // super.destroy();
     }
 
-    public void connect(String cluster) throws IOException {
-        ProtoRequest req=ProtoRequest.newBuilder().setJoinReq(ProtoJoinRequest.newBuilder().setClusterName(cluster)).build();
-        send(req);
+    @Override
+    public JChannelStub send(Message msg) throws Exception {
+        ProtoMessage m=Utils.jgMessageToProto(cluster_name, msg, null);
+        ProtoRequest req=ProtoRequest.newBuilder().setMessage(m).build();
+        return send(req);
     }
 
-    public void disconnect(String cluster) throws IOException {
-        ProtoRequest req=ProtoRequest.newBuilder().setLeaveReq(ProtoLeaveRequest.newBuilder().setClusterName(cluster)).build();
-        send(req);
-    }
-
-    protected void send(ProtoRequest req) throws IOException {
-        ByteArray buf=Utils.serialize(req);
-        stub_mgr.forAny(st -> {
-            try {
-                st.send(buf);
-            }
-            catch(Exception e) {
-                throw new RuntimeException(e);
-            }
-        });
+    protected JChannelStub send(ProtoRequest req) throws Exception {
+        ClientStub primary=stub_mgr.getPrimary();
+        if(primary != null) {
+            ByteArray buf=Utils.serialize(req);
+            primary.send(buf);
+            return this;
+        }
+        else
+            throw new IllegalStateException(String.format("%s: send failed (not connected to primary)", local_addr));
     }
 
     @Override public void receive(Address sender, byte[] buf, int offset, int length) {
@@ -204,29 +284,28 @@ public class JChannelStub implements Receiver {
         }
     }
 
+    // received from the server
     protected void handleRequest(ProtoRequest req) throws Exception {
         ProtoRequest.ChoiceCase c=req.getChoiceCase();
         switch(c) {
             case MESSAGE:
                 Message msg=Utils.protoMessageToJG(req.getMessage(), msg_factory, marshaller);
-                Object obj=msg.getPayload();
-                System.out.printf("-- msg from %s: %s\n", msg.getSrc(), obj);
+                up(msg);
                 break;
             case MESSAGE_BATCH:
                 MessageBatch batch=Utils.protoMessageBatchToJG(req.getMessageBatch(), msg_factory, marshaller);
-                int index=1;
-                for(Message m: batch) {
-                    Object o=m.getPayload();
-                    System.out.printf("-- msg %d from %s: %s\n", index++, m.getSrc(), o);
-                }
+                up(batch);
                 break;
             case JOIN_REQ:
                 throw new IllegalStateException("join request not handled by client");
+            case JOIN_RSP:
+                join_rsp.setResult(req.getJoinRsp());
+                break;
             case LEAVE_REQ:
                 throw new IllegalStateException("leave request not handled by client");
             case VIEW:
-                org.jgroups.View view=Utils.protoViewToJGView(req.getView());
-                System.out.printf("-- view: %s\n", view);
+                View tmp=Utils.protoViewToJGView(req.getView());
+                up(new Event(Event.VIEW_CHANGE, tmp));
                 break;
             case EXCEPTION:
                 break;
@@ -236,5 +315,10 @@ public class JChannelStub implements Receiver {
         }
     }
 
+    protected static void notImplemented(String method) {
+        // log.warn("method %s is not implemented in %s", method, JChannelStub.class.getSimpleName());
+        String message=String.format("method %s is not implemented in %s", method, JChannelStub.class.getSimpleName());
+        throw new IllegalArgumentException(message);
+    }
 
 }

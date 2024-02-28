@@ -282,8 +282,7 @@ public class JChannelServer extends ReceiverAdapter implements ConnectionListene
             case MESSAGE_BATCH:
                 throw new IllegalStateException("server cannot receive message batches");
             case JOIN_REQ:
-                cluster_name=req.getJoinReq().getClusterName();
-                channel.connect(cluster_name);
+                handleConnectRequest(req.getJoinReq().getClusterName(), req.getJoinReq().getName());
                 break;
             case LEAVE_REQ:
                 channel.disconnect();
@@ -298,6 +297,22 @@ public class JChannelServer extends ReceiverAdapter implements ConnectionListene
         }
     }
 
+    protected void handleConnectRequest(String cluster, String name) throws Exception {
+        this.cluster_name=cluster;
+        this.name=name;
+        channel.setName(name);
+        ProtoJoinResponse.Builder join_rsp_builder=ProtoJoinResponse.newBuilder();
+        try {
+            channel.connect(cluster_name);
+            join_rsp_builder.setCluster(channel.clusterName())
+              .setLocalAddress(Utils.jgAddressToProtoAddress(channel.address())).setName(channel.name());
+        }
+        catch(Exception ex) {
+            join_rsp_builder.setEx(Utils.exceptionToProto(ex));
+        }
+        ProtoRequest req=ProtoRequest.newBuilder().setJoinRsp(join_rsp_builder.build()).build();
+        send(req);
+    }
 
     public Map<String,String> handleProbe(String... keys) {
         Map<String,String> map=new TreeMap<>();

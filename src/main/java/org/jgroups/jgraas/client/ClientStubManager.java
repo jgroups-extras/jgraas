@@ -1,15 +1,18 @@
 
 package org.jgroups.jgraas.client;
 
-import org.jgroups.Address;
-import org.jgroups.PhysicalAddress;
+import org.jgroups.jgraas.common.ProtoHeartbeat;
+import org.jgroups.jgraas.common.ProtoRequest;
 import org.jgroups.jgraas.server.JChannelServer;
+import org.jgroups.jgraas.util.Utils;
 import org.jgroups.logging.Log;
 import org.jgroups.logging.LogFactory;
+import org.jgroups.util.ByteArray;
 import org.jgroups.util.SocketFactory;
 import org.jgroups.util.TimeScheduler;
 import org.jgroups.util.Util;
 
+import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.util.List;
 import java.util.Objects;
@@ -27,10 +30,6 @@ import java.util.stream.Collectors;
 public class ClientStubManager implements Runnable, ClientStub.CloseListener {
     protected final List<ClientStub> stubs=new CopyOnWriteArrayList<>();
     protected final TimeScheduler    timer;
-    protected final String           cluster_name="changeme !!!";
-    protected Address                local_addr;
-    protected String                 logical_name;
-    protected PhysicalAddress        phys_addr;
     protected final long             reconnect_interval; // reconnect interval (ms)
     protected boolean                use_nio=true;       // whether to use TcpClient or NioClient
     protected Future<?>              reconnector_task, heartbeat_task, timeout_checker_task;
@@ -49,6 +48,17 @@ public class ClientStubManager implements Runnable, ClientStub.CloseListener {
 
     // When sending and non_blocking, how many messages to queue max
     protected int                    max_send_queue=128;
+
+    protected static final ByteArray HEARTBEAT;
+
+    static {
+        try {
+            HEARTBEAT=Utils.serialize(ProtoRequest.newBuilder().setHeartbeat(ProtoHeartbeat.newBuilder().build()).build());
+        }
+        catch(IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
 
 
     public ClientStubManager(Log log, TimeScheduler timer, long reconnect_interval) {
@@ -143,7 +153,7 @@ public class ClientStubManager implements Runnable, ClientStub.CloseListener {
         for(ClientStub stub: stubs) {
             if(!stub.isConnected()) {
                 try {
-                    stub.connect(cluster_name, local_addr, logical_name, phys_addr);
+                    stub.connect();
                 }
                 catch(Exception ex) {
                     failed_connect_attempts=true;
@@ -154,18 +164,7 @@ public class ClientStubManager implements Runnable, ClientStub.CloseListener {
             startReconnector();
     }
 
-    
-    public void disconnectStubs() {
-        stopReconnector();
-        for(ClientStub stub: stubs) {
-            try {
-                stub.disconnect(cluster_name, local_addr);
-            }
-            catch(Throwable ignored) {
-            }
-        }
-    }
-    
+
     public void destroyStubs() {
         stopReconnector();
         stubs.forEach(ClientStub::destroy);
@@ -191,9 +190,8 @@ public class ClientStubManager implements Runnable, ClientStub.CloseListener {
         for(ClientStub stub: stubs) {
             if(!stub.isConnected()) {
                 try {
-                    stub.connect(this.cluster_name, this.local_addr, this.logical_name, this.phys_addr);
-                    log.debug("%s: re-established connection to server %s (group: %s)",
-                              local_addr, stub.remote(), this.cluster_name);
+                    stub.connect();
+                    log.debug("%s: re-established connection to server %s", stub.local(), stub.remote());
                 }
                 catch(Exception ex) {
                     failed_reconnect_attempts++;
@@ -208,7 +206,7 @@ public class ClientStubManager implements Runnable, ClientStub.CloseListener {
     public void closed(ClientStub stub) {
         try {
             if(log.isDebugEnabled())
-                log.debug("%s: server %s closed connection; starting reconnector task", local_addr, stub.remote());
+                log.debug("%s: server %s closed connection; starting reconnector task", stub.local(), stub.remote());
             stub.destroy();
         }
         catch(Exception ignored) {
@@ -259,10 +257,20 @@ public class ClientStubManager implements Runnable, ClientStub.CloseListener {
         return stub;
     }
 
+    // in upgrade scenarios: the first stub, e.g. version 1
+    protected ClientStub getPrimary() {
+        return stubs.isEmpty()? null : stubs.get(0);
+    }
+
+    // in upgrade scenarios: the second stub, e.g. version 2
+    protected ClientStub getSecondary() {
+        return stubs.size() > 1? stubs.get(1) : null;
+    }
+
     protected void sendHeartbeat() {
         forEach(s -> {
             try {
-                // s.writeRequest(hb);
+                s.send(HEARTBEAT);
             }
             catch(Exception ex) {
                 log.error("failed sending heartbeat", ex);
@@ -275,8 +283,7 @@ public class ClientStubManager implements Runnable, ClientStub.CloseListener {
             long timeout=System.currentTimeMillis() - st.lastHeartbeat();
             if(timeout > heartbeat_timeout) {
                 log.debug("%s: closed connection to server %s as no heartbeat has been received for %s",
-                          local_addr, st.remote(),
-                          Util.printTime(timeout, TimeUnit.MILLISECONDS));
+                          st.local(), st.remote(), Util.printTime(timeout, TimeUnit.MILLISECONDS));
                 st.destroy();
             }
         });

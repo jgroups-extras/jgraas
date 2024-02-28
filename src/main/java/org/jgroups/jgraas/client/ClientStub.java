@@ -1,7 +1,6 @@
 package org.jgroups.jgraas.client;
 
 import org.jgroups.Address;
-import org.jgroups.PhysicalAddress;
 import org.jgroups.annotations.GuardedBy;
 import org.jgroups.blocks.cs.*;
 import org.jgroups.jgraas.server.JChannelServer;
@@ -118,26 +117,13 @@ public class ClientStub extends ReceiverAdapter implements Comparable<ClientStub
     public ClientStub    maxSendQueue(int s)                  {this.max_send_queue=s; return this;}
 
 
-
-    /**
-     * Registers mbr with the Server under the given group, with the given logical name and physical address.
-     * Establishes a connection to the Server and sends a CONNECT message.
-     * @param group The group cluster name under which to register the member
-     * @param addr The address of the member
-     * @param logical_name The logical name of the member
-     * @param phys_addr The physical address of the member
-     * @throws Exception Thrown when the registration failed
-     */
-    public void connect(String group, Address addr, String logical_name, PhysicalAddress phys_addr) throws Exception {
+    /** Creates a connection to the remote server */
+    public synchronized void connect() throws Exception {
         synchronized(this) {
             _doConnect();
         }
         if(handle_heartbeats)
             last_heartbeat=System.currentTimeMillis();
-    }
-
-    public synchronized void connect() throws Exception {
-        _doConnect();
     }
 
     @GuardedBy("lock")
@@ -152,30 +138,8 @@ public class ClientStub extends ReceiverAdapter implements Comparable<ClientStub
         }
     }
 
-
-    public void disconnect(String group, Address addr) throws Exception {
-        if(isConnected()) {
-            //    writeRequest(new GossipData(GossipType.UNREGISTER, group, addr));
-        }
-    }
-
     public void destroy() {
         Util.close(client);
-    }
-
-
-    public void sendToAllMembers(String group, Address sender, byte[] data, int offset, int length) throws Exception {
-        sendToMember(group, null, sender, data, offset, length); // null destination represents mcast
-    }
-
-    public void sendToMember(String group, Address dest, Address sender, byte[] data, int offset, int length) throws Exception {
-        try {
-            // writeRequest(new GossipData(GossipType.MESSAGE, group, dest, data, offset, length).setSender(sender));
-        }
-        catch(Exception ex) {
-            throw new Exception(String.format("connection to %s broken. Could not send message to %s: %s",
-                                              gossipRouterAddress(), dest, ex));
-        }
     }
 
 

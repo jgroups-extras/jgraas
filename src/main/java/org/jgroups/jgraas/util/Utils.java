@@ -3,14 +3,16 @@ package org.jgroups.jgraas.util;
 import com.google.protobuf.ByteString;
 import org.jgroups.*;
 import org.jgroups.blocks.RequestCorrelator;
-import org.jgroups.jgraas.common.*;
 import org.jgroups.jgraas.common.ByteArray;
+import org.jgroups.jgraas.common.*;
 import org.jgroups.protocols.FORK;
 import org.jgroups.protocols.relay.SiteMaster;
 import org.jgroups.protocols.relay.SiteUUID;
 import org.jgroups.util.*;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.PrintStream;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -287,6 +289,20 @@ public class Utils {
         return new View(jg_vid, members);
     }
 
+    public static ProtoException exceptionToProto(Exception ex) {
+        return ProtoException.newBuilder().setClassname(ex.getClass().getName())
+          .setMessage(ex.getMessage()).setStacktrace(getStackTrace(ex)).build();
+    }
+
+    public static <T extends Throwable> T protoExceptionToJava(ProtoException proto_ex) throws Exception {
+        String classname=proto_ex.getClassname(), message=proto_ex.getMessage(), stack=proto_ex.getStacktrace();
+        if(stack != null)
+            message=String.format("%s: %s", message, stack);
+
+        Class<T> cl=(Class<T>)Util.loadClass(classname, Thread.currentThread().getContextClassLoader());
+        return cl.getConstructor(String.class).newInstance(message);
+    }
+
     public static ProtoJoinRequest stringToJoinRequest(String s) {
         return ProtoJoinRequest.newBuilder().setClusterName(s).build();
     }
@@ -317,6 +333,13 @@ public class Utils {
             case MIXED: return MessageBatch.Mode.MIXED;
         }
         throw new IllegalArgumentException(String.format("mode %s not known", m));
+    }
+
+    public static String getStackTrace(Exception ex) {
+        ByteArrayOutputStream out=new ByteArrayOutputStream();
+        PrintStream ps=new PrintStream(out, true);
+        ex.printStackTrace(ps);
+        return out.toString();
     }
 
 }
