@@ -306,7 +306,8 @@ public class JChannelServer extends ReceiverAdapter implements ConnectionListene
             channel.connect(cluster_name);
             IpAddress ip_addr=(IpAddress)channel.down(new Event(Event.GET_PHYSICAL_ADDRESS, channel.address()));
             builder.setCluster(channel.clusterName()).setLocalAddress(Utils.jgAddressToProtoAddress(channel.address()))
-              .setName(channel.name()).setIpAddr(Utils.ipAddressToProto(ip_addr));
+              .setName(channel.name()).setIpAddr(Utils.ipAddressToProto(ip_addr))
+              .setView(Utils.jgViewToProtoView(channel.view()));
         }
         catch(Exception ex) {
             builder.setEx(Utils.exceptionToProto(ex));

@@ -23,6 +23,7 @@
     <nexus.snapshot.server.url>https://repository.jboss.org/nexus/content/repositories/snapshots/</nexus.snapshot.server.url>
     <testng.version>7.8.0</testng.version>
     <jgroups.version>5.3.5.Final-SNAPSHOT</jgroups.version>
+    <log4j2.version>2.23.0</log4j2.version>
   </properties>
 
   <organization>
@@ -105,6 +106,12 @@
       <groupId>org.jgroups</groupId>
       <artifactId>jgroups</artifactId>
       <version>${jgroups.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.logging.log4j</groupId>
+      <artifactId>log4j-core</artifactId>
+      <version>${log4j2.version}</version>
+      <optional>true</optional>
     </dependency>
   </dependencies>
 

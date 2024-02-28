@@ -262,6 +262,9 @@ public class JChannelStub extends JChannel implements Receiver {
         this.name=rsp.getName();
         this.cluster_name=rsp.getCluster();
         this.physical_addr=Utils.protoIpAddressToJG(rsp.getIpAddr());
+        View current_srv_view=rsp.hasView()? Utils.protoViewToJGView(rsp.getView()) : null;
+        if(current_srv_view != null && !current_srv_view.equals(this.view))
+            this.view=current_srv_view;
         state=State.CONNECTED;
         notifyChannelConnected(this);
         return this;
