@@ -23,6 +23,7 @@ import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.Callable;
 
 /**
  * Implementation of {@link org.jgroups.JChannel} forwarding requests to a remote {@link JChannelServer}.
@@ -340,6 +341,22 @@ public class JChannelStub extends JChannel implements Receiver {
         catch(Exception e) {
             throw new RuntimeException(e);
         }
+    }
+
+    @Override
+    public JChannel getState(Address target, long timeout) throws Exception {
+        return this;
+        // return (JChannel)notImplemented("getState()");
+    }
+
+    @Override
+    public JChannel getState(Address target, long timeout, boolean useFlushIfPresent) throws Exception {
+        return (JChannel)notImplemented("getState()");
+    }
+
+    @Override
+    protected JChannel getState(Address target, long timeout, Callable<Boolean> flushInvoker) throws Exception {
+        return (JChannel)notImplemented("getState()");
     }
 
     // received from the server
