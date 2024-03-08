@@ -118,6 +118,7 @@ public class JChannelStub extends JChannel implements Receiver {
 
     public JChannelStub() throws Exception {
         super(false);
+        init();
     }
 
     public JChannelStub(String ignored) throws Exception {
@@ -147,6 +148,7 @@ public class JChannelStub extends JChannel implements Receiver {
 
     public JChannelStub(InetSocketAddress srv) throws Exception {
         super(false);
+        init();
         addServer(srv);
     }
 
@@ -170,6 +172,7 @@ public class JChannelStub extends JChannel implements Receiver {
         super.init();
         physical_addr=null;
         name=null;
+        prot_stack=new ClientProtocolStack();
         return this;
     }
 
