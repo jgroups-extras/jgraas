@@ -22,7 +22,7 @@
     <nexus.snapshot.server.id>jboss-snapshots-repository</nexus.snapshot.server.id>
     <nexus.snapshot.server.url>https://repository.jboss.org/nexus/content/repositories/snapshots/</nexus.snapshot.server.url>
     <testng.version>7.8.0</testng.version>
-    <jgroups.version>5.3.5.Final-SNAPSHOT</jgroups.version>
+    <jgroups.version>5.3.5.Final</jgroups.version>
     <log4j2.version>2.23.0</log4j2.version>
   </properties>
 
