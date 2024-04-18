@@ -1,5 +1,6 @@
 package org.jgroups.jgraas.server;
 
+import com.google.protobuf.ByteString;
 import org.jgroups.Receiver;
 import org.jgroups.*;
 import org.jgroups.annotations.Component;
@@ -17,12 +18,14 @@ import org.jgroups.logging.LogFactory;
 import org.jgroups.stack.Configurator;
 import org.jgroups.stack.DiagnosticsHandler;
 import org.jgroups.stack.IpAddress;
+import org.jgroups.stack.StateTransferInfo;
 import org.jgroups.util.ByteArray;
 import org.jgroups.util.*;
 
 import java.io.ByteArrayInputStream;
 import java.io.DataInput;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.net.Inet6Address;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
@@ -38,24 +41,30 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * @since 5.3.3
  */
 public class JChannelServer extends ReceiverAdapter implements ConnectionListener, DiagnosticsHandler.ProbeHandler {
-    @ManagedAttribute(description="The bind address which should be used by the server")
+    @Property(description="The bind address which should be used by the server")
     protected InetAddress          bind_addr;
 
-    @ManagedAttribute(description="server port on which the server accepts client connections", writable=true)
+    @Property(description="server port on which the server accepts client connections", writable=true)
     protected int                  port=12500;
 
-    @ManagedAttribute(description="The cluster name")
+    @Property(description="The cluster name")
     protected String               cluster_name;
+
+    @Property(description="Configuration of the channel")
+    protected String               config="udp.xml";
+
+    @Property(description="The channel name")
+    protected String               name;
     
-    @ManagedAttribute(description="Time (in msecs) until idle client connections are closed. 0 disables expiration.",
-      writable=true,type=AttributeType.TIME)
+    @Property(description="Time (in msecs) until idle client connections are closed. 0 disables expiration.",
+      type=AttributeType.TIME)
     protected long                 expiry_time;
 
-    @ManagedAttribute(description="Interval (in msecs) to check for expired connections and close them. 0 disables reaping.",
-      writable=true,type=AttributeType.TIME)
+    @Property(description="Interval (in msecs) to check for expired connections and close them. 0 disables reaping.",
+      type=AttributeType.TIME)
     protected long                 reaper_interval;
 
-    @ManagedAttribute(description="Time (in ms) for setting SO_LINGER on sockets returned from accept(). 0 means do not set SO_LINGER"
+    @Property(description="Time (in ms) for setting SO_LINGER on sockets returned from accept(). 0 means do not set SO_LINGER"
       ,type=AttributeType.TIME)
     protected int                  linger_timeout=-1;
 
@@ -63,16 +72,16 @@ public class JChannelServer extends ReceiverAdapter implements ConnectionListene
 
     protected SocketFactory        socket_factory=new DefaultSocketFactory();
 
-    @ManagedAttribute(description="Initial size of the TCP/NIO receive buffer (in bytes)")
+    @Property(description="Initial size of the TCP/NIO receive buffer (in bytes)")
     protected int                  recv_buf_size;
 
-    @ManagedAttribute(description="Expose the server via JMX")
+    @Property(description="Expose the server via JMX")
     protected boolean              jmx;
 
-    @ManagedAttribute(description="Use non-blocking IO (true) or blocking IO (false). Cannot be changed at runtime")
+    @Property(description="Use non-blocking IO (true) or blocking IO (false). Cannot be changed at runtime")
     protected boolean              use_nio;
 
-    @ManagedAttribute(description="The max number of bytes a message can have. If greater, an exception will be " +
+    @Property(description="The max number of bytes a message can have. If greater, an exception will be " +
       "thrown. 0 disables this", type=AttributeType.BYTES)
     protected int                  max_length;
 
@@ -81,17 +90,16 @@ public class JChannelServer extends ReceiverAdapter implements ConnectionListene
     @Component(name="tls",description="Contains the attributes for TLS (SSL sockets) when enabled=true")
     protected TLS                  tls=new TLS();
 
-    @ManagedAttribute(description="Use bounded queues for sending (https://issues.redhat.com/browse/JGRP-2759)) in TCP (use_nio=false)")
+    @Property(description="Use bounded queues for sending (https://issues.redhat.com/browse/JGRP-2759)) in TCP (use_nio=false)")
     protected boolean              non_blocking_sends;
 
-    @ManagedAttribute(description="When sending and non_blocking, how many messages to queue max")
+    @Property(description="When sending and non_blocking, how many messages to queue max")
     protected int                  max_send_queue=128;
 
-    @Property(description="Configuration of the channel")
-    protected String               config="udp.xml";
+    @Property(description="Time (ms) to wait for application state from client")
+    protected long                 state_timeout=15000;
 
-    @Property(description="The channel name")
-    protected String               name;
+
 
     protected JChannel             channel;
     protected BaseServer           server;
@@ -100,6 +108,7 @@ public class JChannelServer extends ReceiverAdapter implements ConnectionListene
     protected final MessageFactory msg_factory=new DefaultMessageFactory();
     protected final AtomicBoolean  running=new AtomicBoolean(false);
     protected final Log            log=LogFactory.getLog(this.getClass());
+    protected final Promise<StateTransferInfo> state_rsp=new Promise<>();
 
 
 
@@ -157,6 +166,8 @@ public class JChannelServer extends ReceiverAdapter implements ConnectionListene
     public JChannelServer maxSendQueue(int s)                {this.max_send_queue=s; return this;}
     public Marshaller     marshaller()                       {return marshaller;}
     public JChannelServer marshaller(Marshaller m)           {this.marshaller=m; return this;}
+    public long           stateTimeout()                     {return state_timeout;}
+    public JChannelServer stateTimeout(long t)               {state_timeout=t; return this;}
 
 
     @ManagedAttribute(description="operational status", name="running")
@@ -275,8 +286,6 @@ public class JChannelServer extends ReceiverAdapter implements ConnectionListene
         switch(c) {
             case MESSAGE:
                 Message msg=Utils.protoMessageToJG(req.getMessage(), msg_factory, marshaller);
-                Object obj=msg.getPayload();
-                System.out.printf("-- msg from %s: %s\n", msg.getSrc(), obj);
                 channel.send(msg);
                 break;
             case MESSAGE_BATCH:
@@ -286,6 +295,20 @@ public class JChannelServer extends ReceiverAdapter implements ConnectionListene
                 break;
             case LEAVE_REQ:
                 channel.disconnect();
+                break;
+            case STATE_REQ:
+                ProtoAddress tmp=req.getStateReq().getTarget();
+                long timeout=req.getStateReq().getTimeout();
+                Address target=tmp == null? null : Utils.protoAddressToJGAddress(tmp);
+                channel.getState(target, timeout);
+                break;
+            case GET_STATE_RSP:
+                if(req.hasGetStateRsp()) {
+                    ByteString buf=req.getGetStateRsp().getState();
+                    StateTransferInfo info=new StateTransferInfo(null, 0, buf.toByteArray());
+                    state_rsp.setResult(info);
+                }
+                else log.warn("%s state response from client is empty", localAddress());
                 break;
             case VIEW:
                 throw new IllegalStateException("server cannot receive views");
@@ -387,9 +410,14 @@ public class JChannelServer extends ReceiverAdapter implements ConnectionListene
     @Override public void connectionClosed(Connection conn) {}
 
 
-    protected void send(ProtoRequest req) throws Exception {
-        ByteArray buf=Utils.serialize(req);
-        server.send(null, buf.getArray(), buf.getOffset(), buf.getLength());
+    protected void send(ProtoRequest req)  {
+        try {
+            ByteArray buf=Utils.serialize(req);
+            server.send(null, buf.getArray(), buf.getOffset(), buf.getLength());
+        }
+        catch(Exception ex) {
+            log.error("%s: failed sending request: %s", localAddress(), ex);
+        }
     }
 
     /** Receives messages from other members: forward to remote client */
@@ -398,7 +426,7 @@ public class JChannelServer extends ReceiverAdapter implements ConnectionListene
         @Override
         public void receive(Message msg) {
             try {
-                System.out.printf("-- received msg from %s: %s\n", msg.src(), msg.getPayload());
+                // System.out.printf("-- received msg from %s: %s\n", msg.src(), msg.getPayload());
                 ProtoMessage m=Utils.jgMessageToProto(cluster_name, msg, marshaller);
                 ProtoRequest req=ProtoRequest.newBuilder().setMessage(m).build();
                 send(req);
@@ -410,27 +438,39 @@ public class JChannelServer extends ReceiverAdapter implements ConnectionListene
 
         @Override
         public void receive(MessageBatch batch) {
-            System.out.printf("-- received msg batch from %s: %d msgs\n", batch.sender(), batch.size());
+            // System.out.printf("-- received msg batch from %s: %d msgs\n", batch.sender(), batch.size());
             ProtoMessageBatch mb=Utils.jgMessageBatchToProto(batch, marshaller);
             ProtoRequest req=ProtoRequest.newBuilder().setMessageBatch(mb).build();
-            try {
-                send(req);
-            }
-            catch(Exception e) {
-                throw new RuntimeException(e);
-            }
+            send(req);
         }
 
         @Override
         public void viewAccepted(View new_view) {
             ProtoView pv=Utils.jgViewToProtoView(new_view);
             ProtoRequest req=ProtoRequest.newBuilder().setView(pv).build();
-            try {
-                send(req);
-            }
-            catch(Exception e) {
-                log.warn("failed serializing/sending request", e);
-            }
+            send(req);
+        }
+
+        @Override
+        public void getState(OutputStream out) throws Exception {
+            ProtoGetStateReq state_req=ProtoGetStateReq.newBuilder().build();
+            ProtoRequest req=ProtoRequest.newBuilder().setGetStateReq(state_req).build();
+            state_rsp.reset(true);
+            send(req);
+            StateTransferInfo result=state_rsp.getResult(state_timeout);
+            if(result != null)
+                out.write(result.state);
+            else
+                log.warn("%s: timed out waiting for state response from client", localAddress());
+        }
+
+        @Override
+        public void setState(InputStream in) throws Exception {
+            org.jgroups.jgraas.common.ByteArray buf=Utils.readAll(in);
+            ByteString bs=ByteString.copyFrom(buf.getArray(), buf.getOffset(), buf.getLength());
+            ProtoSetStateReq r=ProtoSetStateReq.newBuilder().setState(bs).build();
+            ProtoRequest req=ProtoRequest.newBuilder().setSetStateReq(r).build();
+            send(req);
         }
     }
 

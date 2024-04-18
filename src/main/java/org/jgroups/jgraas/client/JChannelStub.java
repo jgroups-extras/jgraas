@@ -1,5 +1,6 @@
 package org.jgroups.jgraas.client;
 
+import com.google.protobuf.ByteString;
 import org.jgroups.*;
 import org.jgroups.annotations.Component;
 import org.jgroups.annotations.MBean;
@@ -12,6 +13,7 @@ import org.jgroups.jgraas.common.*;
 import org.jgroups.jgraas.server.JChannelServer;
 import org.jgroups.jgraas.util.Utils;
 import org.jgroups.stack.Protocol;
+import org.jgroups.stack.StateTransferInfo;
 import org.jgroups.util.ByteArray;
 import org.jgroups.util.*;
 
@@ -206,7 +208,7 @@ public class JChannelStub extends JChannel implements Receiver {
                   .receiver(this).tcpNoDelay(tcp_nodelay);
             }
             catch(Throwable t) {
-                log.error("%s: failed creating stub to %s: %s", target, t);
+                log.error("%s: failed creating stub to %s: %s", local_addr, target, t);
             }
         }
         stub_mgr.connectStubs();
@@ -344,20 +346,15 @@ public class JChannelStub extends JChannel implements Receiver {
     }
 
     @Override
-    public JChannel getState(Address target, long timeout) throws Exception {
-        return this;
-        // return (JChannel)notImplemented("getState()");
-    }
-
-    @Override
-    public JChannel getState(Address target, long timeout, boolean useFlushIfPresent) throws Exception {
-        return (JChannel)notImplemented("getState()");
-    }
-
-    @Override
     protected JChannel getState(Address target, long timeout, Callable<Boolean> flushInvoker) throws Exception {
-        return (JChannel)notImplemented("getState()");
+        ProtoStateRequest s=ProtoStateRequest.newBuilder().setTarget(Utils.jgAddressToProtoAddress(target))
+          .setTimeout(timeout).build();
+        ProtoRequest req=ProtoRequest.newBuilder().setStateReq(s).build();
+        send(req);
+        return this;
     }
+
+
 
     // received from the server
     protected void handleRequest(ProtoRequest req) throws Exception {
@@ -378,6 +375,20 @@ public class JChannelStub extends JChannel implements Receiver {
                 break;
             case LEAVE_REQ:
                 throw new IllegalStateException("leave request not handled by client");
+            case GET_STATE_REQ:
+                StateTransferInfo application_state=(StateTransferInfo)up(new Event(Event.GET_APPLSTATE, null));
+                if(application_state != null && application_state.state != null) {
+                    ByteString tmp=ByteString.copyFrom(application_state.state);
+                    ProtoGetStateRsp state_rsp=ProtoGetStateRsp.newBuilder().setState(tmp).build();
+                    ProtoRequest r=ProtoRequest.newBuilder().setGetStateRsp(state_rsp).build();
+                    send(r);
+                }
+                break;
+            case SET_STATE_REQ:
+                ByteString buf=req.getSetStateReq().getState();
+                StateTransferResult info=new StateTransferResult(buf.toByteArray());
+                up(new Event(Event.GET_STATE_OK, info));
+                break;
             case VIEW:
                 View tmp=Utils.protoViewToJGView(req.getView());
                 up(new Event(Event.VIEW_CHANGE, tmp));

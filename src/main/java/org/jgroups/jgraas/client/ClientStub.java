@@ -6,7 +6,6 @@ import org.jgroups.blocks.cs.*;
 import org.jgroups.jgraas.server.JChannelServer;
 import org.jgroups.logging.Log;
 import org.jgroups.logging.LogFactory;
-import org.jgroups.protocols.PingData;
 import org.jgroups.stack.IpAddress;
 import org.jgroups.util.ByteArray;
 import org.jgroups.util.ByteArrayDataInputStream;
@@ -16,7 +15,7 @@ import org.jgroups.util.Util;
 import java.io.DataInput;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
-import java.util.*;
+import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 
 
@@ -24,66 +23,53 @@ import java.util.concurrent.TimeUnit;
  * Client stub that talks to a remote Server via blocking or non-blocking TCP
  * @author Bela Ban
  */
-public class ClientStub extends ReceiverAdapter implements Comparable<ClientStub>, ConnectionListener {
-    public interface MembersNotification {void members(List<PingData> mbrs);}
-    public interface CloseListener       {void closed(ClientStub stub);}
-
-    protected BaseServer        client;
-    protected IpAddress         local;     // bind address
-    protected IpAddress         remote;    // address of remote Server
-    protected InetSocketAddress remote_sa; // address of remote Server, not resolved yet
-    protected final boolean     use_nio;
-    protected Receiver          receiver;  // external consumer of data, e.g. TUNNEL
-    protected CloseListener     close_listener;
-    protected SocketFactory     socket_factory;
-    protected static final Log  log=LogFactory.getLog(ClientStub.class);
+public class ClientStub extends ReceiverAdapter implements Comparable<ClientStub> {
+    protected BaseServer         client;
+    protected IpAddress          local;     // bind address
+    protected IpAddress          remote;    // address of remote Server
+    protected InetSocketAddress  remote_sa; // address of remote Server, not resolved yet
+    protected final boolean      use_nio;
+    protected Receiver           receiver;  // external consumer of data, e.g. TUNNEL
+    protected SocketFactory      socket_factory;
+    protected static final Log   log=LogFactory.getLog(ClientStub.class);
 
     // max number of ms to wait for socket establishment to Server
-    protected int               sock_conn_timeout=3000;
-    protected boolean           tcp_nodelay=true;
-    protected int               linger=-1; // SO_LINGER (number of seconds, -1 disables it)
-    protected boolean           handle_heartbeats;
+    protected int                sock_conn_timeout=3000;
+    protected boolean            tcp_nodelay=true;
+    protected int                linger=-1; // SO_LINGER (number of seconds, -1 disables it)
+    protected boolean            handle_heartbeats;
     // timestamp of last heartbeat (or message from Server)
-    protected volatile long     last_heartbeat;
+    protected volatile long      last_heartbeat;
 
     // Use bounded queues for sending (https://issues.redhat.com/browse/JGRP-2759)") in TCP
-    protected boolean           non_blocking_sends;
+    protected boolean            non_blocking_sends;
 
     // When sending and non_blocking, how many messages to queue max
-    protected int               max_send_queue=128;
+    protected int                max_send_queue=128;
 
-    // map to correlate GET_MBRS requests and responses
-    protected final Map<String,List<MembersNotification>> get_members_map=new HashMap<>();
+    protected ConnectionListener conn_listener;
 
 
-    public ClientStub(InetSocketAddress local_sa, InetSocketAddress remote_sa, boolean use_nio, CloseListener l, SocketFactory sf) {
-       this(local_sa, remote_sa, use_nio, l, sf, -1);
-    }
-
-    public ClientStub(InetSocketAddress local_sa, InetSocketAddress remote_sa, boolean use_nio, CloseListener l,
-                      SocketFactory sf, int linger) {
-        this(local_sa, remote_sa, use_nio, l, sf, linger, false, 0);
-    }
 
     /**
-     * Creates a stub to a remote_sa {@link JChannelServer}.
-     * @param local_sa The local_sa bind address and port
-     * @param remote_sa The address:port of the server
+     * Creates a stub to a remote {@link JChannelServer}.
+     * @param local The local bind address and port
+     * @param remote The address:port of the server
      * @param use_nio Whether to use ({@link org.jgroups.protocols.TCP_NIO2}) or {@link org.jgroups.protocols.TCP}
-     * @param l The {@link CloseListener}
+     * @param l The {@link ConnectionListener}
      * @param sf The {@link SocketFactory} to use to create the client socket
      * @param linger SO_LINGER timeout
      * @param non_blocking_sends When true and a TcpClient is used, non-blocking sends are enabled
      *                           (https://issues.redhat.com/browse/JGRP-2759)
      * @param max_send_queue The max size of the send queue for non-blocking sends
      */
-    public ClientStub(InetSocketAddress local_sa, InetSocketAddress remote_sa, boolean use_nio, CloseListener l,
+    public ClientStub(InetSocketAddress local, InetSocketAddress remote, boolean use_nio, ConnectionListener l,
                       SocketFactory sf, int linger, boolean non_blocking_sends, int max_send_queue) {
-        this.local=local_sa != null? new IpAddress(local_sa.getAddress(), local_sa.getPort())
+        this.local=local != null? new IpAddress(local.getAddress(), local.getPort())
           : new IpAddress((InetAddress)null,0);
-        this.remote_sa=Objects.requireNonNull(remote_sa);
+        this.remote_sa=Objects.requireNonNull(remote);
         this.use_nio=use_nio;
-        this.close_listener=l;
+        this.conn_listener=l;
         this.socket_factory=sf;
         this.linger=linger;
         this.non_blocking_sends=non_blocking_sends;
@@ -93,28 +79,33 @@ public class ClientStub extends ReceiverAdapter implements Comparable<ClientStub
     }
 
 
-    public IpAddress     local()                              {return local;}
-    public IpAddress     remote()                             {return remote;}
-    public ClientStub    receiver(Receiver r)                 {receiver=r; return this;}
-    public Receiver      receiver()                           {return receiver;}
-    public boolean       tcpNoDelay()                         {return tcp_nodelay;}
-    public ClientStub    tcpNoDelay(boolean tcp_nodelay)      {this.tcp_nodelay=tcp_nodelay; return this;}
-    public CloseListener connectionListener()                 {return close_listener;}
-    public ClientStub    connectionListener(CloseListener l)  {this.close_listener=l; return this;}
-    public int           socketConnectionTimeout()            {return sock_conn_timeout;}
-    public ClientStub    socketConnectionTimeout(int timeout) {this.sock_conn_timeout=timeout; return this;}
-    public boolean       useNio()                             {return use_nio;}
-    public IpAddress     gossipRouterAddress()                {return remote;}
-    public boolean       isConnected()                        {return client != null && ((TcpClient)client).isConnected();}
-    public ClientStub    handleHeartbeats(boolean f)          {handle_heartbeats=f; return this;}
-    public boolean       handleHeartbeats()                   {return handle_heartbeats;}
-    public long          lastHeartbeat()                      {return last_heartbeat;}
-    public int           getLinger()                          {return linger;}
-    public ClientStub    setLinger(int l)                     {this.linger=l; return this;}
-    public boolean       nonBlockingSends()                   {return non_blocking_sends;}
-    public ClientStub    nonBlockingSends(boolean b)          {this.non_blocking_sends=b; return this;}
-    public int           maxSendQueue()                       {return max_send_queue;}
-    public ClientStub    maxSendQueue(int s)                  {this.max_send_queue=s; return this;}
+    public IpAddress          local()                                  {return local;}
+    public IpAddress          remote()                                 {return remote;}
+    public ClientStub         receiver(Receiver r)                     {receiver=r; return this;}
+    public Receiver           receiver()                               {return receiver;}
+    public boolean            tcpNoDelay()                             {return tcp_nodelay;}
+    public ClientStub         tcpNoDelay(boolean tcp_nodelay)          {this.tcp_nodelay=tcp_nodelay; return this;}
+    public int                socketConnectionTimeout()                {return sock_conn_timeout;}
+    public ClientStub         socketConnectionTimeout(int timeout)     {this.sock_conn_timeout=timeout; return this;}
+    public boolean            useNio()                                 {return use_nio;}
+    public IpAddress          gossipRouterAddress()                    {return remote;}
+    public boolean            isConnected()                            {return client != null && ((TcpClient)client).isConnected();}
+    public ClientStub         handleHeartbeats(boolean f)              {handle_heartbeats=f; return this;}
+    public boolean            handleHeartbeats()                       {return handle_heartbeats;}
+    public long               lastHeartbeat()                          {return last_heartbeat;}
+    public int                getLinger()                              {return linger;}
+    public ClientStub         setLinger(int l)                         {this.linger=l; return this;}
+    public boolean            nonBlockingSends()                       {return non_blocking_sends;}
+    public ClientStub         nonBlockingSends(boolean b)              {this.non_blocking_sends=b; return this;}
+    public int                maxSendQueue()                           {return max_send_queue;}
+    public ClientStub         maxSendQueue(int s)                      {this.max_send_queue=s; return this;}
+
+    public ClientStub connectionListener(ConnectionListener l) {
+        this.conn_listener=l;
+        if(client != null)
+            client.addConnectionListener(conn_listener);
+        return this;
+    }
 
 
     /** Creates a connection to the remote server */
@@ -128,8 +119,11 @@ public class ClientStub extends ReceiverAdapter implements Comparable<ClientStub
 
     @GuardedBy("lock")
     protected void _doConnect() throws Exception {
-        if(client != null)
+        if(client != null) {
+            if(conn_listener != null)
+                client.addConnectionListener(conn_listener);
             client.start();
+        }
         else {
             if(resolveRemoteAddress() && (client=createClient(this.socket_factory)) != null)
                 client.start();
@@ -160,17 +154,6 @@ public class ClientStub extends ReceiverAdapter implements Comparable<ClientStub
         }
     }
 
-    @Override
-    public void connectionClosed(Connection conn) {
-        if(close_listener != null)
-            close_listener.closed(this);
-    }
-
-    @Override
-    public void connectionEstablished(Connection conn) {
-
-    }
-
     @Override public int compareTo(ClientStub o) {
         return remote.compareTo(o.remote);
     }
@@ -188,7 +171,7 @@ public class ClientStub extends ReceiverAdapter implements Comparable<ClientStub
                              Util.printTime(System.currentTimeMillis()-last_heartbeat, TimeUnit.MILLISECONDS));
     }
 
-    /** Creates remote from remote_sa. If the latter is unresolved, tries to resolve it one more time (e.g. via DNS) */
+    /** Creates remote from remote. If the latter is unresolved, tries to resolve it one more time (e.g. via DNS) */
     protected boolean resolveRemoteAddress() {
         if(this.remote != null)
             return true;
@@ -206,8 +189,9 @@ public class ClientStub extends ReceiverAdapter implements Comparable<ClientStub
           : new TcpClient(local, remote).nonBlockingSends(non_blocking_sends).maxSendQueue(max_send_queue);
         if(sf != null) cl.socketFactory(sf);
         cl.receiver(this);
-        cl.addConnectionListener(this);
         cl.socketConnectionTimeout(sock_conn_timeout).tcpNodelay(tcp_nodelay).linger(linger);
+        if(conn_listener != null)
+            cl.addConnectionListener(conn_listener);
         return cl;
     }
 
@@ -219,38 +203,5 @@ public class ClientStub extends ReceiverAdapter implements Comparable<ClientStub
     public void send(byte[] buf, int offset, int length) throws Exception {
         client.send(remote, buf, offset, length);
     }
-
-    protected void removeResponse(String group, MembersNotification notif) {
-        synchronized(get_members_map) {
-            List<MembersNotification> set=get_members_map.get(group);
-            if(set == null || set.isEmpty()) {
-                get_members_map.remove(group);
-                return;
-            }
-            if(set.remove(notif) && set.isEmpty())
-                get_members_map.remove(group);
-        }
-    }
-
-    protected void notifyResponse(String group, List<PingData> list) {
-        if(group == null)
-            return;
-        if(list == null)
-            list=Collections.emptyList();
-        synchronized(get_members_map) {
-            List<MembersNotification> set=get_members_map.get(group);
-            while(set != null && !set.isEmpty()) {
-                try {
-                    MembersNotification rsp=set.remove(0);
-                    rsp.members(list);
-                }
-                catch(Throwable t) {
-                    log.error("failed notifying %s: %s", group, t);
-                }
-            }
-            get_members_map.remove(group);
-        }
-    }
-
 
 }
