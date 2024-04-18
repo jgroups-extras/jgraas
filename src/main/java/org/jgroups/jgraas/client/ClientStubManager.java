@@ -1,6 +1,8 @@
 
 package org.jgroups.jgraas.client;
 
+import org.jgroups.blocks.cs.Connection;
+import org.jgroups.blocks.cs.ConnectionListener;
 import org.jgroups.jgraas.common.ProtoHeartbeat;
 import org.jgroups.jgraas.common.ProtoRequest;
 import org.jgroups.jgraas.server.JChannelServer;
@@ -18,21 +20,22 @@ import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
+
+import static java.util.concurrent.TimeUnit.MILLISECONDS;
 
 /**
  * Client talking to the remote {@link JChannelServer}
  * @author Bela Ban
  * @since 5.3.3
  */
-public class ClientStubManager implements Runnable, ClientStub.CloseListener {
+public class ClientStubManager implements Runnable, ConnectionListener {
     protected final List<ClientStub> stubs=new CopyOnWriteArrayList<>();
     protected final TimeScheduler    timer;
     protected final long             reconnect_interval; // reconnect interval (ms)
     protected boolean                use_nio=true;       // whether to use TcpClient or NioClient
-    protected Future<?>              reconnector_task, heartbeat_task, timeout_checker_task;
+    protected Future<?>              reconnector, heartbeat, timeout_checker;
     protected final Log              log;
     protected SocketFactory          socket_factory;
     // Sends a heartbeat to the server every heartbeat_interval ms (0 disables this)
@@ -67,25 +70,16 @@ public class ClientStubManager implements Runnable, ClientStub.CloseListener {
         this.reconnect_interval=reconnect_interval;
     }
 
-    public static ClientStubManager emptyClientStubManager(Log log, TimeScheduler timer) {
-        return new ClientStubManager(log, timer, 0L);
-    }
-    
 
-    public ClientStubManager useNio(boolean flag)        {use_nio=flag; return this;}
-    public boolean           reconnectorRunning()        {return reconnector_task != null && !reconnector_task.isDone();}
-    public boolean           heartbeaterRunning()        {return heartbeat_task != null && !heartbeat_task.isDone();}
-    public boolean           timeouterRunning()          {return timeout_checker_task != null && !timeout_checker_task.isDone();}
-    public boolean           nonBlockingSends()          {return non_blocking_sends;}
-    public ClientStubManager nonBlockingSends(boolean b) {this.non_blocking_sends=b; return this;}
-    public int               maxSendQueue()              {return max_send_queue;}
-    public ClientStubManager maxSendQueue(int s)         {this.max_send_queue=s; return this;}
-
-
-    public ClientStubManager socketFactory(SocketFactory socket_factory) {
-        this.socket_factory=socket_factory;
-        return this;
-    }
+    public ClientStubManager useNio(boolean flag)            {use_nio=flag; return this;}
+    public boolean           reconnectorRunning()            {return reconnector != null && !reconnector.isDone();}
+    public boolean           heartbeaterRunning()            {return heartbeat != null && !heartbeat.isDone();}
+    public boolean           timeouterRunning()              {return timeout_checker != null && !timeout_checker.isDone();}
+    public boolean           nonBlockingSends()              {return non_blocking_sends;}
+    public ClientStubManager nonBlockingSends(boolean b)     {this.non_blocking_sends=b; return this;}
+    public int               maxSendQueue()                  {return max_send_queue;}
+    public ClientStubManager maxSendQueue(int s)             {this.max_send_queue=s; return this;}
+    public ClientStubManager socketFactory(SocketFactory sf) {this.socket_factory=sf; return this;}
 
     public ClientStubManager heartbeat(long heartbeat_interval, long heartbeat_timeout) {
         if(heartbeat_interval <= 0) {
@@ -202,49 +196,53 @@ public class ClientStubManager implements Runnable, ClientStub.CloseListener {
             stopReconnector();
     }
 
-    @Override
-    public void closed(ClientStub stub) {
-        try {
-            if(log.isDebugEnabled())
-                log.debug("%s: server %s closed connection; starting reconnector task", stub.local(), stub.remote());
-            stub.destroy();
-        }
-        catch(Exception ignored) {
 
-        }
+
+    @Override
+    public void connectionEstablished(Connection conn) {
+        // System.out.printf("-- connection established: %s\n", conn);
+    }
+
+    @Override
+    public void connectionClosed(Connection conn) {
+
+        // System.out.printf("closed connection %s; starting reconnector task\n", conn);
+
+        if(log.isDebugEnabled())
+            log.debug("closed connection %s; starting reconnector task", conn);
         startReconnector();
     }
 
 
     protected synchronized void startReconnector() {
-        if(reconnector_task == null || reconnector_task.isDone())
-            reconnector_task=timer.scheduleWithFixedDelay(this, reconnect_interval, reconnect_interval, TimeUnit.MILLISECONDS);
+        if(reconnector == null || reconnector.isDone())
+            reconnector=timer.scheduleWithFixedDelay(this, reconnect_interval, reconnect_interval, MILLISECONDS);
     }
 
     protected synchronized void stopReconnector() {
-        if(reconnector_task != null)
-            reconnector_task.cancel(true);
+        if(reconnector != null)
+            reconnector.cancel(true);
     }
 
     protected synchronized void startHeartbeatTask() {
-        if(heartbeat_task == null || heartbeat_task.isDone())
-            heartbeat_task=timer.scheduleWithFixedDelay(this.send_heartbeat, heartbeat_interval, heartbeat_interval, TimeUnit.MILLISECONDS);
+        if(heartbeat == null || heartbeat.isDone())
+            heartbeat=timer.scheduleWithFixedDelay(send_heartbeat, heartbeat_interval, heartbeat_interval, MILLISECONDS);
     }
 
     protected synchronized void stopHeartbeatTask() {
         stopTimeoutChecker();
-        if(heartbeat_task != null)
-            heartbeat_task.cancel(true);
+        if(heartbeat != null)
+            heartbeat.cancel(true);
     }
 
     protected synchronized void startTimeoutChecker() {
-        if(timeout_checker_task == null || timeout_checker_task.isDone())
-            timeout_checker_task=timer.scheduleWithFixedDelay(this.check_timeouts, heartbeat_timeout, heartbeat_timeout, TimeUnit.MILLISECONDS);
+        if(timeout_checker == null || timeout_checker.isDone())
+            timeout_checker=timer.scheduleWithFixedDelay(check_timeouts, heartbeat_timeout, heartbeat_timeout, MILLISECONDS);
     }
 
     protected synchronized void stopTimeoutChecker() {
-        if(timeout_checker_task != null)
-            timeout_checker_task.cancel(true);
+        if(timeout_checker != null)
+            timeout_checker.cancel(true);
     }
 
     protected ClientStub findRandomConnectedStub() {
@@ -283,7 +281,7 @@ public class ClientStubManager implements Runnable, ClientStub.CloseListener {
             long timeout=System.currentTimeMillis() - st.lastHeartbeat();
             if(timeout > heartbeat_timeout) {
                 log.debug("%s: closed connection to server %s as no heartbeat has been received for %s",
-                          st.local(), st.remote(), Util.printTime(timeout, TimeUnit.MILLISECONDS));
+                          st.local(), st.remote(), Util.printTime(timeout, MILLISECONDS));
                 st.destroy();
             }
         });
