@@ -13,6 +13,7 @@ import org.jgroups.util.*;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.PrintStream;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
@@ -367,6 +368,24 @@ public class Utils {
         PrintStream ps=new PrintStream(out, true);
         ex.printStackTrace(ps);
         return out.toString();
+    }
+
+    public static ByteArray readAll(InputStream in) {
+        ExposedByteArrayOutputStream out=new ExposedByteArrayOutputStream();
+        byte[] tmp=new byte[256];
+        for(;;) {
+            try {
+                int num=in.read(tmp);
+                if(num == -1)
+                    break;
+                out.write(tmp, 0, num);
+            }
+            catch(IOException e) {
+                break;
+            }
+        }
+        org.jgroups.util.ByteArray ba=out.getBuffer();
+        return new ByteArray(ba.getArray(), ba.getOffset(), ba.getLength());
     }
 
 }
