@@ -5,6 +5,7 @@ package org.jgroups.jgraas.demos;
 
 import org.jgroups.Address;
 import org.jgroups.JChannel;
+import org.jgroups.Receiver;
 import org.jgroups.View;
 import org.jgroups.blocks.ReplicatedHashMap;
 import org.jgroups.jgraas.client.JChannelStub;
@@ -21,7 +22,7 @@ import java.util.Map;
  * of a group; all hashmaps with the same name find each other and form a group.
  * @author Bela Ban
  */
-public class ReplicatedHashMapDemo implements ReplicatedHashMap.Notification<String,String> {
+public class ReplicatedHashMapDemo implements ReplicatedHashMap.Notification<String,String>, Receiver {
     ReplicatedHashMap<String,String>  map=null;
 
 
@@ -31,10 +32,10 @@ public class ReplicatedHashMapDemo implements ReplicatedHashMap.Notification<Str
 
 
     public void start(JChannel channel) throws Exception {
-        map=new ReplicatedHashMap<>(channel);
+        map=new JGraasHashMap(channel);
         map.addNotifier(this);
         map.start(10000); // fetches the state
-        System.out.println("help\nput key value\nget key\nlist:");
+        h();
         for(;;) {
             String line=Util.readLine(System.in).trim();
             if(line.startsWith("help")) {
@@ -54,7 +55,7 @@ public class ReplicatedHashMapDemo implements ReplicatedHashMap.Notification<Str
                     map.put(key, value);
                 continue;
             }
-            if(line.startsWith("list")) {
+            if(line.startsWith("ls")) {
                 System.out.println(map.toString());
                 continue;
             }
@@ -80,7 +81,7 @@ public class ReplicatedHashMapDemo implements ReplicatedHashMap.Notification<Str
     }
 
     protected static void h() {
-        System.out.println("help\nput <key> <value> [times]\nget <key>\nlist\nclear\nremove <key>:");
+        System.out.println("help\nput <key> <value> [times]\nget <key>\nls\nclear\nremove <key>:");
     }
 
     public void entrySet(String key, String value) {
